@@ -25,30 +25,26 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 session = curl_requests.Session(impersonate="chrome120")
 session.headers.update({"Accept-Language": "nl-NL,nl;q=0.9"})
 
-# --- РАБОТА С БАЗОЙ ЗАДАЧ ---
-def save_tasks_to_db(tasks):
-    try:
-        supabase.table("parser_configs").delete().neq("id", 0).execute()
-        supabase.table("parser_configs").insert({"tasks": tasks}).execute()
-        logger.info("Новый JSON сохранен в базу.")
-    except Exception as e:
-        logger.error(f"Ошибка сохранения JSON в базу: {e}")
+# Словарь для перевода слаг-категорий в ID
+CATEGORIES_MAP = {
+    "antiek-en-kunst": 1, "audio-tv-en-foto": 31, "auto-kopen": 91,
+    "auto-onderdelen": 2600, "auto-diversen": 48, "boeken": 201,
+    "caravans-en-kamperen": 289, "cd-s-en-dvd-s": 1744, "computers-en-software": 322,
+    "contacten-en-berichten": 378, "diensten-en-vakmensen": 1098, "dieren-en-toebehoren": 395,
+    "doe-het-zelf-en-verbouw": 239, "fietsen-en-brommers": 445, "hobby-en-vrije-tijd": 1099,
+    "huis-en-inrichting": 504, "huizen-en-kamers": 1032, "kinderen-en-baby-s": 565,
+    "kleding-dames": 621, "kleding-heren": 1776, "motoren": 678,
+    "muziek-en-instrumenten": 728, "postzegels-en-munten": 1784, "sieraden-tassen-en-uiterlijk": 1826,
+    "spelcomputers-en-games": 356, "sport-en-fitness": 784, "telecommunicatie": 820,
+    "tickets-en-kaartjes": 1984, "tuin-en-terras": 1847, "vacatures": 167,
+    "vakantie": 856, "verzamelen": 895, "watersport-en-boten": 976,
+    "witgoed-en-apparatuur": 537, "zakelijke-goederen": 1085, "diversen": 428
+}
 
-def get_tasks_from_db():
-    try:
-        response = supabase.table("parser_configs").select("tasks").order("id", desc=True).limit(1).execute()
-        if response.data:
-            return response.data[0]["tasks"]
-    except Exception as e:
-        logger.error(f"Ошибка чтения JSON из базы: {e}")
-    return []
-
-def wait_for_tg_json(timeout_minutes=10):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        return get_tasks_from_db()
-
-    msg = f"⏳ Парсер запущен. Жду JSON ({timeout_minutes} мин). Если не пришлёшь — возьму последний из базы."
-    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": msg})
+def wait_for_tg_input(timeout_minutes=10):
+    """Ждет текст от юзера в формате: URL | PAGES"""
+    msg = f"⏳ Парсер запущен. Скинь ссылку и кол-во страниц в формате:\n`URL | 10`\nЖду {timeout_minutes} минут..."
+    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
     last_update_id = 0
     try:
@@ -58,7 +54,7 @@ def wait_for_tg_json(timeout_minutes=10):
             if updates: last_update_id = updates[-1]["update_id"]
     except Exception: pass
 
-    logger.info(f"Ожидание файла в Telegram ({timeout_minutes} минут)...")
+    logger.info(f"Ожидание сообщения в Telegram ({timeout_minutes} минут)...")
     start_time = time.time()
     
     while time.time() - start_time < timeout_minutes * 60:
@@ -73,26 +69,63 @@ def wait_for_tg_json(timeout_minutes=10):
                     last_update_id = update["update_id"]
                     msg_obj = update.get("message")
                     
-                    if msg_obj and "document" in msg_obj:
-                        doc = msg_obj["document"]
-                        if doc.get("file_name", "").endswith(".json"):
-                            logger.info(f"Получен файл: {doc['file_name']}")
-                            file_info = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={doc['file_id']}", timeout=10).json()
-                            file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_info['result']['file_path']}"
-                            content = session.get(file_url, timeout=10).content.decode('utf-8')
-                            
-                            tasks = json.loads(content)
-                            save_tasks_to_db(tasks)
+                    if msg_obj and "text" in msg_obj:
+                        text = msg_obj["text"]
+                        if "|" in text:
+                            parts = text.split("|")
+                            url = parts[0].strip()
+                            try:
+                                pages = int(parts[1].strip())
+                            except:
+                                pages = 1
                             
                             session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                                         json={"chat_id": TG_CHAT_ID, "text": "✅ Новый JSON получен! Начинаю."})
-                            return tasks
+                                         json={"chat_id": TG_CHAT_ID, "text": f"✅ Принято! Парсим {pages} страниц."})
+                            return url, pages
         except Exception: pass
         time.sleep(2)
 
-    return get_tasks_from_db()
+    return None, 0
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def build_api_url(raw_url):
+    """Превращает любую ссылку Marktplaats в запрос к API"""
+    # 1. Отделяем хэш (фильтры цен)
+    price_from, price_to = None, None
+    if "#" in raw_url:
+        hash_part = raw_url.split("#")[1]
+        f_match = re.search(r'PriceCentsFrom:(\d+)', hash_part)
+        t_match = re.search(r'PriceCentsTo:(\d+)', hash_part)
+        if f_match: price_from = int(f_match.group(1)) // 100
+        if t_match: price_to = int(t_match.group(1)) // 100
+        raw_url = raw_url.split("#")[0]
+
+    base_api = "https://www.marktplaats.nl/lrp/api/search?limit=30"
+    
+    # 2. Если это категория (/l/...)
+    if "/l/" in raw_url:
+        match = re.search(r'/l/([^/]+)/', raw_url)
+        if match:
+            slug = match.group(1)
+            cat_id = CATEGORIES_MAP.get(slug)
+            if cat_id:
+                base_api += f"&l1CategoryId={cat_id}"
+            else:
+                # Если категория неизвестна, пробуем искать по слову из ссылки
+                base_api += f"&query={slug}"
+                
+    # 3. Если это поиск (/q/...)
+    elif "/q/" in raw_url:
+        match = re.search(r'/q/([^/]+)/', raw_url)
+        if match:
+            query = match.group(1).replace("+", "%20")
+            base_api += f"&query={query}"
+
+    # 4. Добавляем цены
+    if price_from is not None: base_api += f"&priceFrom={price_from}"
+    if price_to is not None: base_api += f"&priceTo={price_to}"
+    
+    return base_api, price_from, price_to
+
 def init_db():
     conn = sqlite3.connect('marktplaats_parser.db')
     conn.execute('''CREATE TABLE IF NOT EXISTS snapshots 
@@ -106,29 +139,27 @@ def fetch_json(url):
         if resp.status_code in [403, 429]: return None
         resp.raise_for_status()
         return resp.json()
-    except Exception: return None
+    except Exception as e: 
+        logger.error(f"Ошибка API: {e}")
+        return None
 
 def get_item_details(item_id):
     """Строим ссылку ТОЛЬКО из ID и достаем просмотры."""
     item_id = str(item_id).strip()
-    # Если ID начинается на 'a' - это магазин, если на 'm' (или что-то другое) - частник
     item_type = "a" if item_id.startswith("a") else "v"
     url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
     
     try:
         resp = session.get(url, timeout=15)
-        if resp.status_code != 200: 
-            return 0, 0
+        if resp.status_code != 200: return 0, 0
         html = resp.text
         
-        # Ищем конфиг именно объявления
         match = re.search(r'window\.__CONFIG__\s*=\s*(\{.+?\});', html, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
             stats = data.get("listing", {}).get("stats", {})
             return stats.get("viewCount", 0), stats.get("favoritedCount", 0)
-    except Exception:
-        pass
+    except Exception: pass
     return 0, 0
 
 def send_telegram(text):
@@ -138,16 +169,6 @@ def send_telegram(text):
                      json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception: pass
 
-def build_page_url(base_url, page_number):
-    parsed = urlparse(base_url)
-    query = parse_qs(parsed.query)
-    limit = int(query.get('limit', [30])[0])
-    query['offset'] = [str(page_number * limit)]
-    query['limit'] = [str(limit)]
-    new_query = urlencode(query, doseq=True)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-
-# --- СОХРАНЕНИЕ ---
 def process_and_save(parsed_items, conn):
     if not parsed_items: return
     cursor = conn.cursor()
@@ -171,7 +192,7 @@ def process_and_save(parsed_items, conn):
             
             price_str = f"{current_price / 100:.2f} €" if current_price else "См. описание"
             msg = (f"🆕 <b>Новое!</b>\n📦 <b>{item['title']}</b>\n"
-                   f"💰 {price_str}\n📁 ID категории: {item['category']}\n"
+                   f"💰 {price_str}\n📁 Категория: {item['category']}\n"
                    f"👁 {item['views_count']} | ❤️ {item['favorites_count']}\n"
                    f"🔗 <a href='{item['url']}'>Открыть</a>")
             send_telegram(msg)
@@ -203,73 +224,73 @@ def process_and_save(parsed_items, conn):
     except Exception as e:
         logger.error(f"Ошибка Supabase: {e}")
 
-# --- ГЛАВНАЯ ФУНКЦИЯ ---
 def main():
     logger.info(f"🚀 Старт парсера")
-    tasks = wait_for_tg_json(timeout_minutes=10)
-    if not tasks: return
+    raw_url, pages = wait_for_tg_input(timeout_minutes=10)
+    
+    if not raw_url or pages == 0:
+        logger.warning("Ссылка не получена. Завершаем.")
+        return
+
+    api_base, p_from, p_to = build_api_url(raw_url)
+    logger.info(f"Сформирован URL API: {api_base}")
 
     conn = init_db()
     
-    for task in tasks:
-        category_id = task.get("category_id")
-        price_from = task.get("price_from")
-        price_to = task.get("price_to")
-        pages = task.get("pages", 1)
+    for page in range(pages):
+        # Подставляем offset для пагинации
+        url = f"{api_base}&offset={page * 30}"
+        data = fetch_json(url)
+        if not data: break
         
-        base_url = f"https://www.marktplaats.nl/lrp/api/search?l1CategoryId={category_id}"
-        if price_from is not None: base_url += f"&priceFrom={price_from}"
-        if price_to is not None: base_url += f"&priceTo={price_to}"
+        items = data.get("listings", [])
+        if not items: break
         
-        logger.info(f"Категория {category_id} (страниц: {pages})")
+        page_ids = [item.get("itemId") for item in items if item.get("itemId")]
         
-        for page in range(pages):
-            url = build_page_url(base_url, page)
-            data = fetch_json(url)
-            if not data: break
+        existing = set()
+        try:
+            resp = supabase.table("marktplaats_listings").select("id").in_("id", page_ids).execute()
+            existing = {row["id"] for row in resp.data}
+        except Exception: pass
             
-            items = data.get("listings", [])
-            if not items: break
+        parsed_items = []
+        for item in items:
+            item_id = str(item.get("itemId")).strip()
+            if not item_id: continue
             
-            page_ids = [item.get("itemId") for item in items if item.get("itemId")]
+            item_type = "a" if item_id.startswith("a") else "v"
+            full_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
             
-            existing = set()
-            try:
-                resp = supabase.table("marktplaats_listings").select("id").in_("id", page_ids).execute()
-                existing = {row["id"] for row in resp.data}
-            except Exception: pass
-                
-            parsed_items = []
-            for item in items:
-                item_id = str(item.get("itemId")).strip()
-                if not item_id: continue
-                
-                # ЖЕСТКО СТРОИМ ССЫЛКУ НА ОБЪЯВЛЕНИЕ
-                item_type = "a" if item_id.startswith("a") else "v"
-                full_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
-                
-                views, favorites = 0, 0
-                if FETCH_DETAILS or item_id not in existing:
-                    views, favorites = get_item_details(item_id)
-                    time.sleep(random.uniform(1, 2))
-                
-                parsed_items.append({
-                    "id": item_id,
-                    "title": item.get("title", "Без названия"),
-                    "publication_date": item.get("date", ""),
-                    "parsing_date": datetime.now(timezone.utc).isoformat(),
-                    "category": str(category_id), 
-                    "price_cents": item.get("priceInfo", {}).get("priceCents"),
-                    "views_count": views,
-                    "favorites_count": favorites,
-                    "url": full_url,
-                    "last_seen": datetime.now(timezone.utc).isoformat()
-                })
+            views, favorites = 0, 0
+            if FETCH_DETAILS or item_id not in existing:
+                views, favorites = get_item_details(item_id)
+                time.sleep(random.uniform(1, 2))
             
-            process_and_save(parsed_items, conn)
-            time.sleep(random.uniform(1, 2))
+            # Берем ID категории из словаря или пишем Custom
+            cat_id = "Custom"
+            if "/l/" in raw_url:
+                slug = raw_url.split("/l/")[1].split("/")[0]
+                cat_id = str(CATEGORIES_MAP.get(slug, "Unknown"))
+
+            parsed_items.append({
+                "id": item_id,
+                "title": item.get("title", "Без названия"),
+                "publication_date": item.get("date", ""),
+                "parsing_date": datetime.now(timezone.utc).isoformat(),
+                "category": cat_id, 
+                "price_cents": item.get("priceInfo", {}).get("priceCents"),
+                "views_count": views,
+                "favorites_count": favorites,
+                "url": full_url,
+                "last_seen": datetime.now(timezone.utc).isoformat()
+            })
+        
+        process_and_save(parsed_items, conn)
+        time.sleep(random.uniform(1, 2))
 
     conn.close()
+    send_telegram("✅ Парсинг завершен!")
     logger.info("✅ Работа завершена.")
 
 if __name__ == "__main__":
