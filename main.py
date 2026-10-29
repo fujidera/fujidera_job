@@ -19,7 +19,6 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-# ⚠️ ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ (True - заходить в карточки за просмотрами, False - быстро)
 FETCH_DETAILS = True 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -110,8 +109,9 @@ def fetch_json(url):
     except Exception: return None
 
 def get_item_details(item_id):
-    """Жестко склеиваем ссылку по ID и забираем просмотры."""
+    """Строим ссылку ТОЛЬКО из ID и достаем просмотры."""
     item_id = str(item_id).strip()
+    # Если ID начинается на 'a' - это магазин, если на 'm' (или что-то другое) - частник
     item_type = "a" if item_id.startswith("a") else "v"
     url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
     
@@ -120,13 +120,15 @@ def get_item_details(item_id):
         if resp.status_code != 200: 
             return 0, 0
         html = resp.text
+        
+        # Ищем конфиг именно объявления
         match = re.search(r'window\.__CONFIG__\s*=\s*(\{.+?\});', html, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
             stats = data.get("listing", {}).get("stats", {})
             return stats.get("viewCount", 0), stats.get("favoritedCount", 0)
-    except Exception as e:
-        pass # Тихо игнорируем ошибки одного товара
+    except Exception:
+        pass
     return 0, 0
 
 def send_telegram(text):
@@ -203,7 +205,7 @@ def process_and_save(parsed_items, conn):
 
 # --- ГЛАВНАЯ ФУНКЦИЯ ---
 def main():
-    logger.info(f"🚀 Старт парсера (FETCH_DETAILS={FETCH_DETAILS})")
+    logger.info(f"🚀 Старт парсера")
     tasks = wait_for_tg_json(timeout_minutes=10)
     if not tasks: return
 
@@ -239,28 +241,28 @@ def main():
                 
             parsed_items = []
             for item in items:
-                item_id = item.get("itemId")
+                item_id = str(item.get("itemId")).strip()
                 if not item_id: continue
                 
-                item_id = str(item_id).strip()
+                # ЖЕСТКО СТРОИМ ССЫЛКУ НА ОБЪЯВЛЕНИЕ
                 item_type = "a" if item_id.startswith("a") else "v"
-                real_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
+                full_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
                 
                 views, favorites = 0, 0
                 if FETCH_DETAILS or item_id not in existing:
                     views, favorites = get_item_details(item_id)
-                    time.sleep(random.uniform(1, 2)) # Пауза
+                    time.sleep(random.uniform(1, 2))
                 
                 parsed_items.append({
                     "id": item_id,
                     "title": item.get("title", "Без названия"),
                     "publication_date": item.get("date", ""),
                     "parsing_date": datetime.now(timezone.utc).isoformat(),
-                    "category": str(category_id),
+                    "category": str(category_id), 
                     "price_cents": item.get("priceInfo", {}).get("priceCents"),
                     "views_count": views,
                     "favorites_count": favorites,
-                    "url": real_url,
+                    "url": full_url,
                     "last_seen": datetime.now(timezone.utc).isoformat()
                 })
             
