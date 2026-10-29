@@ -1,0 +1,2 @@
+curl-cffi>=0.6.0
+supabase>=2.0.0
