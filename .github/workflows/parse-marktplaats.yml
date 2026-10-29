@@ -1,0 +1,32 @@
+name: Parse Marktplaats to Supabase
+
+on:
+  schedule:
+    # Запуск каждые 6 часов (настройте под свои нужды)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Позволяет запускать вручную из вкладки Actions
+
+jobs:
+  run-parser:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Marktplaats parser
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}  # Опционально, но настоятельно рекомендуется
+        run: python main.py
