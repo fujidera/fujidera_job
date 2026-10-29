@@ -21,7 +21,6 @@ TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 # ⚠️ ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ
 # True: заходить в карточку каждого товара (обновляет просмотры, но медленно)
-# False: заходить только в новые товары (быстро, но у старых просмотры не меняются)
 FETCH_DETAILS = True 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -113,6 +112,10 @@ def fetch_json(url):
 
 def get_item_details(url):
     """Заходит по готовой ссылке и достает просмотры/избранное из window.__CONFIG__"""
+    # Проверка, что ссылка полная (начинается с http)
+    if not url.startswith("http"):
+        url = f"https://www.marktplaats.nl{url}"
+        
     try:
         resp = session.get(url, timeout=15)
         if resp.status_code != 200: 
@@ -189,7 +192,6 @@ def process_and_save(parsed_items, conn):
             
         if updated_listings:
             for item in updated_listings:
-                # Обновляем цену, время последнего визита, И ПРОСМОТРЫ (если включен FETCH_DETAILS)
                 supabase.table("marktplaats_listings").update({
                     "last_seen": datetime.now(timezone.utc).isoformat(),
                     "price_cents": item["price_cents"],
@@ -241,14 +243,17 @@ def main():
                 item_id = item.get("itemId")
                 if not item_id: continue
                 
-                # Формируем правильную ссылку (v для частников, a для магазинов)
-                item_type = "a" if item_id.startswith("a") else "v"
-                real_url = item.get("vipUrl") or f"https://www.marktplaats.nl/{item_type}/{item_id}"
+                # Формируем ссылку. Если API отдает относительную, она исправится в get_item_details
+                raw_url = item.get("vipUrl")
+                if not raw_url:
+                    item_type = "a" if item_id.startswith("a") else "v"
+                    raw_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
+                elif not raw_url.startswith("http"):
+                    raw_url = f"https://www.marktplaats.nl{raw_url}"
                 
                 views, favorites = 0, 0
-                # Логика FETCH_DETAILS: если True, идем за просмотрами ВСЕГДА. Если False - только для новых.
                 if FETCH_DETAILS or item_id not in existing:
-                    views, favorites = get_item_details(real_url)
+                    views, favorites = get_item_details(raw_url)
                     time.sleep(random.uniform(1, 2)) # Пауза, чтобы не забанили
                 
                 parsed_items.append({
@@ -260,7 +265,7 @@ def main():
                     "price_cents": item.get("priceInfo", {}).get("priceCents"),
                     "views_count": views,
                     "favorites_count": favorites,
-                    "url": real_url,
+                    "url": raw_url,
                     "last_seen": datetime.now(timezone.utc).isoformat()
                 })
             
