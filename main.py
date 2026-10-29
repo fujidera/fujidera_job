@@ -19,8 +19,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-# ⚠️ ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ
-# True: заходить в карточку каждого товара (обновляет просмотры, но медленно)
+# ⚠️ ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ (True - заходить в карточки за просмотрами, False - быстро)
 FETCH_DETAILS = True 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -110,12 +109,12 @@ def fetch_json(url):
         return resp.json()
     except Exception: return None
 
-def get_item_details(url):
-    """Заходит по готовой ссылке и достает просмотры/избранное из window.__CONFIG__"""
-    # Проверка, что ссылка полная (начинается с http)
-    if not url.startswith("http"):
-        url = f"https://www.marktplaats.nl{url}"
-        
+def get_item_details(item_id):
+    """Жестко склеиваем ссылку по ID и забираем просмотры."""
+    item_id = str(item_id).strip()
+    item_type = "a" if item_id.startswith("a") else "v"
+    url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
+    
     try:
         resp = session.get(url, timeout=15)
         if resp.status_code != 200: 
@@ -127,7 +126,7 @@ def get_item_details(url):
             stats = data.get("listing", {}).get("stats", {})
             return stats.get("viewCount", 0), stats.get("favoritedCount", 0)
     except Exception as e:
-        logger.error(f"Ошибка парсинга деталей: {e}")
+        pass # Тихо игнорируем ошибки одного товара
     return 0, 0
 
 def send_telegram(text):
@@ -243,18 +242,14 @@ def main():
                 item_id = item.get("itemId")
                 if not item_id: continue
                 
-                # Формируем ссылку. Если API отдает относительную, она исправится в get_item_details
-                raw_url = item.get("vipUrl")
-                if not raw_url:
-                    item_type = "a" if item_id.startswith("a") else "v"
-                    raw_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
-                elif not raw_url.startswith("http"):
-                    raw_url = f"https://www.marktplaats.nl{raw_url}"
+                item_id = str(item_id).strip()
+                item_type = "a" if item_id.startswith("a") else "v"
+                real_url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
                 
                 views, favorites = 0, 0
                 if FETCH_DETAILS or item_id not in existing:
-                    views, favorites = get_item_details(raw_url)
-                    time.sleep(random.uniform(1, 2)) # Пауза, чтобы не забанили
+                    views, favorites = get_item_details(item_id)
+                    time.sleep(random.uniform(1, 2)) # Пауза
                 
                 parsed_items.append({
                     "id": item_id,
@@ -265,7 +260,7 @@ def main():
                     "price_cents": item.get("priceInfo", {}).get("priceCents"),
                     "views_count": views,
                     "favorites_count": favorites,
-                    "url": raw_url,
+                    "url": real_url,
                     "last_seen": datetime.now(timezone.utc).isoformat()
                 })
             
