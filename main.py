@@ -23,7 +23,100 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 session = curl_requests.Session(impersonate="chrome120")
 session.headers.update({"Accept-Language": "nl-NL,nl;q=0.9"})
 
-# --- SQLite (История цен) ---
+# --- РАБОТА С БАЗОЙ ЗАДАЧ ---
+def save_tasks_to_db(tasks):
+    try:
+        # Удаляем старый конфиг и пишем новый
+        supabase.table("parser_configs").delete().neq("id", 0).execute()
+        supabase.table("parser_configs").insert({"tasks": tasks}).execute()
+        logger.info("Новый JSON сохранен в базу.")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения JSON в базу: {e}")
+
+def get_tasks_from_db():
+    try:
+        # Берем самый свежий конфиг
+        response = supabase.table("parser_configs").select("tasks").order("id", desc=True).limit(1).execute()
+        if response.data:
+            return response.data[0]["tasks"]
+    except Exception as e:
+        logger.error(f"Ошибка чтения JSON из базы: {e}")
+    return []
+
+def wait_for_tg_json(timeout_minutes=10):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        logger.warning("TG не настроен. Беру задачи из базы.")
+        return get_tasks_from_db()
+
+    # 1. Пишем в ТГ, что мы стартовали
+    msg = f"⏳ Парсер запущен. Жду новый JSON-файл ({timeout_minutes} мин). Если не пришлёшь — возьму тот, что ты скидывал в прошлый раз."
+    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": msg})
+
+    # 2. Узнаем ID последнего сообщения
+    last_update_id = 0
+    try:
+        r = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", timeout=10)
+        if r.status_code == 200 and r.json().get("ok"):
+            updates = r.json().get("result", [])
+            if updates:
+                last_update_id = updates[-1]["update_id"]
+    except Exception:
+        pass
+
+    # 3. Ждем ответа
+    logger.info(f"Ожидание файла в Telegram ({timeout_minutes} минут)...")
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout_minutes * 60:
+        try:
+            r = session.get(
+                f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", 
+                params={"offset": last_update_id + 1, "timeout": 30}, 
+                timeout=40
+            )
+            if r.status_code == 200 and r.json().get("ok"):
+                updates = r.json().get("result", [])
+                for update in updates:
+                    last_update_id = update["update_id"]
+                    msg_obj = update.get("message")
+                    
+                    if msg_obj and "document" in msg_obj:
+                        doc = msg_obj["document"]
+                        if doc.get("file_name", "").endswith(".json"):
+                            logger.info(f"Получен файл: {doc['file_name']}")
+                            file_id = doc["file_id"]
+                            
+                            # Скачиваем файл
+                            file_info = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
+                            file_path = file_info["result"]["file_path"]
+                            file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}"
+                            content = session.get(file_url, timeout=10).content.decode('utf-8')
+                            
+                            tasks = json.loads(content)
+                            
+                            # СОХРАНЯЕМ В БАЗУ
+                            save_tasks_to_db(tasks)
+                            
+                            session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
+                                         json={"chat_id": TG_CHAT_ID, "text": "✅ Новый JSON получен и сохранен! Начинаю парсинг."})
+                            return tasks
+        except Exception as e:
+            logger.error(f"Ошибка при ожидании: {e}")
+        time.sleep(2)
+
+    # 4. Если время вышло, берем из базы
+    logger.info("Время ожидания истекло. Беру последний JSON из базы данных.")
+    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
+                 json={"chat_id": TG_CHAT_ID, "text": "⏰ Время вышло. Беру сохраненный JSON из базы."})
+    
+    tasks = get_tasks_from_db()
+    if not tasks:
+        logger.error("В базе нет задач! Скинь боту JSON.")
+        session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
+                     json={"chat_id": TG_CHAT_ID, "text": "❌ Ошибка: В базе нет ни одного JSON. Скинь файл!"})
+    return tasks
+
+# --- ОСТАЛЬНОЙ КОД ПАРСЕРА БЕЗ ИЗМЕНЕНИЙ ---
 def init_db():
     conn = sqlite3.connect('marktplaats_parser.db')
     conn.execute('''CREATE TABLE IF NOT EXISTS snapshots 
@@ -31,7 +124,6 @@ def init_db():
     conn.commit()
     return conn
 
-# --- Вспомогательные функции ---
 def fetch_json(url):
     try:
         resp = session.get(url, timeout=15)
@@ -49,27 +141,22 @@ def get_item_details(item_id):
     try:
         resp = session.get(url, timeout=15)
         if resp.status_code != 200: return 0, 0
-        html = resp.text
-        views, favorites = 0, 0
-        match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*({.+?});', html)
+        match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*({.+?});', resp.text)
         if match:
             data = json.loads(match.group(1))
             stats = data.get("listing", {}).get("stats", {}) or data.get("vip", {}).get("stats", {})
-            views = stats.get("viewCount", 0)
-            favorites = stats.get("favoriteCount", 0)
-        return views, favorites
-    except Exception:
-        return 0, 0
+            return stats.get("viewCount", 0), stats.get("favoriteCount", 0)
+    except Exception: pass
+    return 0, 0
 
 def send_telegram(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        session.post(url, json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
+                     json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception: pass
 
 def build_page_url(base_url, page_number):
-    """Добавляет параметр offset для пагинации к API URL."""
     parsed = urlparse(base_url)
     query = parse_qs(parsed.query)
     limit = int(query.get('limit', [30])[0])
@@ -78,7 +165,6 @@ def build_page_url(base_url, page_number):
     new_query = urlencode(query, doseq=True)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
-# --- Главная логика (Идентична Frinity-job) ---
 def process_and_save(parsed_items, conn):
     if not parsed_items: return
     cursor = conn.cursor()
@@ -145,20 +231,17 @@ def process_and_save(parsed_items, conn):
 
 def main():
     logger.info("🚀 Старт парсера")
-    conn = init_db()
     
-    # Загружаем конфиг из Supabase
-    try:
-        response = supabase.table("parser_configs").select("tasks").order("id", desc=True).limit(1).execute()
-        if not response.data:
-            logger.warning("Конфиг не найден. Скиньте JSON боту.")
-            return
-        tasks = response.data[0]["tasks"]
-    except Exception as e:
-        logger.error(f"Ошибка загрузки конфига: {e}")
+    # Получаем задачи (ждем 10 минут или достаем последние из базы)
+    tasks = wait_for_tg_json(timeout_minutes=10)
+    
+    if not tasks:
+        logger.warning("Нет задач для парсинга. Завершаем работу.")
         return
 
-    # Итерируемся по задачам
+    conn = init_db()
+    logger.info(f"Начинаю парсинг {len(tasks)} задач...")
+
     for task in tasks:
         base_url = task.get("url")
         pages = task.get("pages", 1)
@@ -179,7 +262,7 @@ def main():
                 if not item_id: continue
                 
                 views, favorites = get_item_details(item_id)
-                time.sleep(random.uniform(1, 3)) # Задержка
+                time.sleep(random.uniform(1, 3))
                 
                 parsed_items.append({
                     "id": item_id,
