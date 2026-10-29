@@ -19,11 +19,16 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
+# ⚠️ ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ
+# True: заходить в карточку каждого товара (обновляет просмотры, но медленно)
+# False: заходить только в новые товары (быстро, но у старых просмотры не меняются)
+FETCH_DETAILS = True 
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 session = curl_requests.Session(impersonate="chrome120")
 session.headers.update({"Accept-Language": "nl-NL,nl;q=0.9"})
 
-# --- 1. РАБОТА С БАЗОЙ ЗАДАЧ ---
+# --- РАБОТА С БАЗОЙ ЗАДАЧ ---
 def save_tasks_to_db(tasks):
     try:
         supabase.table("parser_configs").delete().neq("id", 0).execute()
@@ -43,10 +48,9 @@ def get_tasks_from_db():
 
 def wait_for_tg_json(timeout_minutes=10):
     if not TG_TOKEN or not TG_CHAT_ID:
-        logger.warning("TG не настроен. Беру задачи из базы.")
         return get_tasks_from_db()
 
-    msg = f"⏳ Парсер запущен. Жду новый JSON-файл ({timeout_minutes} мин). Если не пришлёшь — возьму тот, что ты скидывал в прошлый раз."
+    msg = f"⏳ Парсер запущен. Жду JSON ({timeout_minutes} мин). Если не пришлёшь — возьму последний из базы."
     session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": msg})
 
     last_update_id = 0
@@ -54,10 +58,8 @@ def wait_for_tg_json(timeout_minutes=10):
         r = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", timeout=10)
         if r.status_code == 200 and r.json().get("ok"):
             updates = r.json().get("result", [])
-            if updates:
-                last_update_id = updates[-1]["update_id"]
-    except Exception:
-        pass
+            if updates: last_update_id = updates[-1]["update_id"]
+    except Exception: pass
 
     logger.info(f"Ожидание файла в Telegram ({timeout_minutes} минут)...")
     start_time = time.time()
@@ -66,8 +68,7 @@ def wait_for_tg_json(timeout_minutes=10):
         try:
             r = session.get(
                 f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", 
-                params={"offset": last_update_id + 1, "timeout": 30}, 
-                timeout=40
+                params={"offset": last_update_id + 1, "timeout": 30}, timeout=40
             )
             if r.status_code == 200 and r.json().get("ok"):
                 updates = r.json().get("result", [])
@@ -79,35 +80,22 @@ def wait_for_tg_json(timeout_minutes=10):
                         doc = msg_obj["document"]
                         if doc.get("file_name", "").endswith(".json"):
                             logger.info(f"Получен файл: {doc['file_name']}")
-                            file_id = doc["file_id"]
-                            
-                            file_info = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
-                            file_path = file_info["result"]["file_path"]
-                            file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}"
+                            file_info = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile?file_id={doc['file_id']}", timeout=10).json()
+                            file_url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{file_info['result']['file_path']}"
                             content = session.get(file_url, timeout=10).content.decode('utf-8')
                             
                             tasks = json.loads(content)
                             save_tasks_to_db(tasks)
                             
                             session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                                         json={"chat_id": TG_CHAT_ID, "text": "✅ Новый JSON получен и сохранен! Начинаю парсинг."})
+                                         json={"chat_id": TG_CHAT_ID, "text": "✅ Новый JSON получен! Начинаю."})
                             return tasks
-        except Exception as e:
-            logger.error(f"Ошибка при ожидании: {e}")
+        except Exception: pass
         time.sleep(2)
 
-    logger.info("Время ожидания истекло. Беру последний JSON из базы данных.")
-    session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                 json={"chat_id": TG_CHAT_ID, "text": "⏰ Время вышло. Беру сохраненный JSON из базы."})
-    
-    tasks = get_tasks_from_db()
-    if not tasks:
-        logger.error("В базе нет задач! Скинь боту JSON.")
-        session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
-                     json={"chat_id": TG_CHAT_ID, "text": "❌ Ошибка: В базе нет ни одного JSON. Скинь файл!"})
-    return tasks
+    return get_tasks_from_db()
 
-# --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def init_db():
     conn = sqlite3.connect('marktplaats_parser.db')
     conn.execute('''CREATE TABLE IF NOT EXISTS snapshots 
@@ -118,37 +106,26 @@ def init_db():
 def fetch_json(url):
     try:
         resp = session.get(url, timeout=15)
-        if resp.status_code in [403, 429]:
-            logger.error(f"Блокировка! Код {resp.status_code}.")
-            return None
+        if resp.status_code in [403, 429]: return None
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        logger.error(f"Ошибка API: {e}")
-        return None
+    except Exception: return None
 
-def get_item_details(item_id):
-    """Достает просмотры, избранное и дату из window.__CONFIG__"""
-    url = f"https://www.marktplaats.nl/v/{item_id}"
+def get_item_details(url):
+    """Заходит по готовой ссылке и достает просмотры/избранное из window.__CONFIG__"""
     try:
         resp = session.get(url, timeout=15)
-        if resp.status_code != 200: return 0, 0, ""
+        if resp.status_code != 200: 
+            return 0, 0
         html = resp.text
-        
         match = re.search(r'window\.__CONFIG__\s*=\s*(\{.+?\});', html, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
-            listing = data.get("listing", {})
-            stats = listing.get("stats", {})
-            
-            views = stats.get("viewCount", 0)
-            favorites = stats.get("favoritedCount", 0)
-            pub_date = stats.get("since", "") # ISO 8601
-            
-            return views, favorites, pub_date
+            stats = data.get("listing", {}).get("stats", {})
+            return stats.get("viewCount", 0), stats.get("favoritedCount", 0)
     except Exception as e:
-        logger.error(f"Ошибка парсинга деталей {item_id}: {e}")
-    return 0, 0, ""
+        logger.error(f"Ошибка парсинга деталей: {e}")
+    return 0, 0
 
 def send_telegram(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
@@ -166,7 +143,7 @@ def build_page_url(base_url, page_number):
     new_query = urlencode(query, doseq=True)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
-# --- 3. СОХРАНЕНИЕ И УВЕДОМЛЕНИЯ ---
+# --- СОХРАНЕНИЕ ---
 def process_and_save(parsed_items, conn):
     if not parsed_items: return
     cursor = conn.cursor()
@@ -176,9 +153,7 @@ def process_and_save(parsed_items, conn):
     try:
         response = supabase.table("marktplaats_listings").select("id, price_cents").in_("id", ids_to_check).execute()
         existing_data = {row["id"]: row["price_cents"] for row in response.data}
-    except Exception as e:
-        logger.error(f"Ошибка чтения Supabase: {e}")
-        return
+    except Exception: return
 
     new_listings, updated_listings = [], []
     
@@ -191,26 +166,19 @@ def process_and_save(parsed_items, conn):
             cursor.execute("INSERT INTO snapshots (listing_id, price_cents) VALUES (?, ?)", (item_id, current_price))
             
             price_str = f"{current_price / 100:.2f} €" if current_price else "См. описание"
-            msg = (f"🆕 <b>Новое объявление!</b>\n\n📦 <b>{item['title']}</b>\n"
-                   f"💰 Цена: {price_str}\n📁 {item['category']}\n"
+            msg = (f"🆕 <b>Новое!</b>\n📦 <b>{item['title']}</b>\n"
+                   f"💰 {price_str}\n📁 ID категории: {item['category']}\n"
                    f"👁 {item['views_count']} | ❤️ {item['favorites_count']}\n"
                    f"🔗 <a href='{item['url']}'>Открыть</a>")
             send_telegram(msg)
-            
         else:
             updated_listings.append(item)
             old_price = existing_data[item_id]
-            
             if current_price != old_price:
-                logger.info(f"Изменение цены у {item_id}: {old_price} -> {current_price}")
                 cursor.execute("INSERT INTO snapshots (listing_id, price_cents) VALUES (?, ?)", (item_id, current_price))
-                
-                old_str = f"{old_price / 100:.2f} €" if old_price else "См. описание"
-                new_str = f"{current_price / 100:.2f} €" if current_price else "См. описание"
-                msg = (f"🔄 <b>Изменение цены!</b>\n\n📦 <b>{item['title']}</b>\n"
-                       f"Было: <s>{old_str}</s>\nСтало: <b>{new_str}</b>\n"
-                       f"🔗 <a href='{item['url']}'>Открыть</a>")
-                send_telegram(msg)
+                old_str = f"{old_price / 100:.2f} €" if old_price else "?"
+                new_str = f"{current_price / 100:.2f} €" if current_price else "?"
+                send_telegram(f"🔄 <b>Цена изменилась!</b>\n📦 <b>{item['title']}</b>\nБыло: <s>{old_str}</s>\nСтало: <b>{new_str}</b>\n🔗 <a href='{item['url']}'>Открыть</a>")
 
     conn.commit()
 
@@ -221,41 +189,37 @@ def process_and_save(parsed_items, conn):
             
         if updated_listings:
             for item in updated_listings:
+                # Обновляем цену, время последнего визита, И ПРОСМОТРЫ (если включен FETCH_DETAILS)
                 supabase.table("marktplaats_listings").update({
                     "last_seen": datetime.now(timezone.utc).isoformat(),
+                    "price_cents": item["price_cents"],
                     "views_count": item["views_count"],
-                    "favorites_count": item["favorites_count"],
-                    "price_cents": item["price_cents"]
+                    "favorites_count": item["favorites_count"]
                 }).eq("id", item["id"]).execute()
             logger.info(f"Обновлено: {len(updated_listings)}")
     except Exception as e:
-        logger.error(f"Ошибка записи в Supabase: {e}")
+        logger.error(f"Ошибка Supabase: {e}")
 
-# --- 4. ГЛАВНАЯ ФУНКЦИЯ ---
+# --- ГЛАВНАЯ ФУНКЦИЯ ---
 def main():
-    logger.info("🚀 Старт парсера")
-    
+    logger.info(f"🚀 Старт парсера (FETCH_DETAILS={FETCH_DETAILS})")
     tasks = wait_for_tg_json(timeout_minutes=10)
-    
-    if not tasks:
-        logger.warning("Нет задач для парсинга. Завершаем работу.")
-        return
+    if not tasks: return
 
     conn = init_db()
-    logger.info(f"Начинаю парсинг {len(tasks)} задач...")
-
+    
     for task in tasks:
-        base_url = task.get("url")
         category_id = task.get("category_id")
+        price_from = task.get("price_from")
+        price_to = task.get("price_to")
         pages = task.get("pages", 1)
         
-        if category_id:
-            base_url = f"https://www.marktplaats.nl/lrp/api/search?l1CategoryId={category_id}"
+        base_url = f"https://www.marktplaats.nl/lrp/api/search?l1CategoryId={category_id}"
+        if price_from is not None: base_url += f"&priceFrom={price_from}"
+        if price_to is not None: base_url += f"&priceTo={price_to}"
         
-        if not base_url: 
-            continue
+        logger.info(f"Категория {category_id} (страниц: {pages})")
         
-        logger.info(f"Задача: {base_url} (страниц: {pages})")
         for page in range(pages):
             url = build_page_url(base_url, page)
             data = fetch_json(url)
@@ -264,31 +228,44 @@ def main():
             items = data.get("listings", [])
             if not items: break
             
+            page_ids = [item.get("itemId") for item in items if item.get("itemId")]
+            
+            existing = set()
+            try:
+                resp = supabase.table("marktplaats_listings").select("id").in_("id", page_ids).execute()
+                existing = {row["id"] for row in resp.data}
+            except Exception: pass
+                
             parsed_items = []
             for item in items:
                 item_id = item.get("itemId")
                 if not item_id: continue
                 
-                views, favorites, exact_pub_date = get_item_details(item_id)
-                time.sleep(random.uniform(1, 3))
+                # Формируем правильную ссылку (v для частников, a для магазинов)
+                item_type = "a" if item_id.startswith("a") else "v"
+                real_url = item.get("vipUrl") or f"https://www.marktplaats.nl/{item_type}/{item_id}"
                 
-                pub_date = exact_pub_date if exact_pub_date else item.get("date", "")
+                views, favorites = 0, 0
+                # Логика FETCH_DETAILS: если True, идем за просмотрами ВСЕГДА. Если False - только для новых.
+                if FETCH_DETAILS or item_id not in existing:
+                    views, favorites = get_item_details(real_url)
+                    time.sleep(random.uniform(1, 2)) # Пауза, чтобы не забанили
                 
                 parsed_items.append({
                     "id": item_id,
                     "title": item.get("title", "Без названия"),
-                    "publication_date": pub_date,
+                    "publication_date": item.get("date", ""),
                     "parsing_date": datetime.now(timezone.utc).isoformat(),
-                    "category": item.get("category", {}).get("name", "Unknown"),
+                    "category": str(category_id),
                     "price_cents": item.get("priceInfo", {}).get("priceCents"),
                     "views_count": views,
                     "favorites_count": favorites,
-                    "url": f"https://www.marktplaats.nl/v/{item_id}",
+                    "url": real_url,
                     "last_seen": datetime.now(timezone.utc).isoformat()
                 })
             
             process_and_save(parsed_items, conn)
-            time.sleep(random.uniform(3, 6))
+            time.sleep(random.uniform(1, 2))
 
     conn.close()
     logger.info("✅ Работа завершена.")
