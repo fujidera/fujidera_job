@@ -5,10 +5,10 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from curl_cffi import requests as curl_requests
 from supabase import create_client, Client
-from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -23,6 +23,21 @@ FETCH_DETAILS = True
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 session = curl_requests.Session(impersonate="chrome120")
 session.headers.update({"Accept-Language": "nl-NL,nl;q=0.9"})
+
+CATEGORIES_MAP = {
+    "antiek-en-kunst": 1, "audio-tv-en-foto": 31, "auto-kopen": 91,
+    "auto-onderdelen": 2600, "auto-diversen": 48, "boeken": 201,
+    "caravans-en-kamperen": 289, "cd-s-en-dvd-s": 1744, "computers-en-software": 322,
+    "contacten-en-berichten": 378, "diensten-en-vakmensen": 1098, "dieren-en-toebehoren": 395,
+    "doe-het-zelf-en-verbouw": 239, "fietsen-en-brommers": 445, "hobby-en-vrije-tijd": 1099,
+    "huis-en-inrichting": 504, "huizen-en-kamers": 1032, "kinderen-en-baby-s": 565,
+    "kleding-dames": 621, "kleding-heren": 1776, "motoren": 678,
+    "muziek-en-instrumenten": 728, "postzegels-en-munten": 1784, "sieraden-tassen-en-uiterlijk": 1826,
+    "spelcomputers-en-games": 356, "sport-en-fitness": 784, "telecommunicatie": 820,
+    "tickets-en-kaartjes": 1984, "tuin-en-terras": 1847, "vacatures": 167,
+    "vakantie": 856, "verzamelen": 895, "watersport-en-boten": 976,
+    "witgoed-en-apparatuur": 537, "zakelijke-goederen": 1085, "diversen": 428
+}
 
 def get_updates(offset):
     try:
@@ -50,17 +65,38 @@ def send_tg(text):
         session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception: pass
 
-def get_page_url(base_url, page):
-    if page == 1:
-        return base_url
-    if '#' in base_url:
-        url, hash_part = base_url.split('#', 1)
-        hash_part = '#' + hash_part
-    else:
-        url, hash_part = base_url, ''
+def build_api_url(raw_url):
+    """Превращает ссылку юзера в правильный запрос к API"""
+    price_from, price_to = None, None
+    if "#" in raw_url:
+        hash_part = raw_url.split("#")[1]
+        f_match = re.search(r'PriceCentsFrom:(\d+)', hash_part)
+        t_match = re.search(r'PriceCentsTo:(\d+)', hash_part)
+        if f_match: price_from = int(f_match.group(1)) // 100
+        if t_match: price_to = int(t_match.group(1)) // 100
+        raw_url = raw_url.split("#")[0]
+
+    base_api = "https://www.marktplaats.nl/lrp/api/search?limit=30"
     
-    url = url.rstrip('/')
-    return f"{url}/p/{page}/{hash_part}"
+    if "/l/" in raw_url:
+        match = re.search(r'/l/([^/]+)/', raw_url)
+        if match:
+            slug = match.group(1)
+            cat_id = CATEGORIES_MAP.get(slug)
+            if cat_id:
+                base_api += f"&l1CategoryId={cat_id}"
+            else:
+                base_api += f"&query={slug}"
+    elif "/q/" in raw_url:
+        match = re.search(r'/q/([^/]+)/', raw_url)
+        if match:
+            query = match.group(1).replace("+", "%20")
+            base_api += f"&query={query}"
+
+    if price_from is not None: base_api += f"&priceFrom={price_from}"
+    if price_to is not None: base_api += f"&priceTo={price_to}"
+    
+    return base_api
 
 def get_item_details(item_url):
     try:
@@ -84,6 +120,16 @@ def get_item_details(item_url):
     except Exception as e:
         logger.error(f"Ошибка парсинга {item_url}: {e}")
         return 0, 0
+
+def fetch_json(url):
+    try:
+        resp = session.get(url, timeout=15)
+        if resp.status_code in [403, 429]: return None
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e: 
+        logger.error(f"Ошибка API: {e}")
+        return None
 
 def init_db():
     conn = sqlite3.connect('marktplaats_parser.db')
@@ -156,7 +202,7 @@ def main():
     updates = get_updates(offset=0)
     last_update_id = updates[-1]["update_id"] if updates else 0
 
-    send_tg("1️⃣ Скинь ссылку на категорию или поиск\n(например: <code>https://www.marktplaats.nl/l/computers-en-software/#PriceCentsFrom:12000|PriceCentsTo:95000</code>)")
+    send_tg("1️⃣ Скинь ссылку на категорию или поиск\n(например: <code>https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000</code>)")
     raw_url, last_update_id = wait_for_text(last_update_id, 10)
     if not raw_url:
         send_tg("❌ Ссылка не получена. Отмена.")
@@ -173,66 +219,48 @@ def main():
 
     send_tg(f"✅ Поехали! Парсим {pages} страниц.")
     
+    api_url = build_api_url(raw_url)
+    logger.info(f"API URL: {api_url}")
+
     conn = init_db()
-    for page in range(1, pages + 1):
-        page_url = get_page_url(raw_url, page)
-        logger.info(f"Загружаем страницу {page}: {page_url}")
+    for page in range(pages):
+        url = f"{api_url}&offset={page * 30}"
+        logger.info(f"Загружаем страницу {page+1}")
+        data = fetch_json(url)
+        if not data: break
         
-        try:
-            resp = session.get(page_url, timeout=15)
-            resp.raise_for_status()
-            html = resp.text
-        except Exception as e:
-            logger.error(f"Ошибка загрузки страницы {page_url}: {e}")
+        items = data.get("listings", [])
+        if not items: 
+            logger.warning(f"На странице {page+1} нет объявлений.")
             break
-            
-        soup = BeautifulSoup(html, 'html.parser')
-        articles = soup.find_all('article')
         
-        if not articles:
-            logger.warning(f"На странице {page} не найдено объявлений.")
-            break
-            
         parsed_items = []
-        for art in articles:
-            a = art.find('a', href=True)
-            if not a: continue
+        for item in items:
+            item_id = str(item.get("itemId")).strip()
+            if not item_id: continue
             
-            href = a['href'].split('?')[0] 
-            if not (href.startswith('/v/') or href.startswith('/a/')): 
-                continue
+            # Берем ссылку из API (vipUrl), если нет — склеиваем вручную
+            raw_href = item.get("vipUrl") or item.get("url") or f"/v/{item_id}"
+            if raw_href.startswith("/"):
+                item_url = f"https://www.marktplaats.nl{raw_href}"
+            else:
+                item_url = raw_href
                 
-            item_id = href.split('/')[-1]
-            full_url = f"https://www.marktplaats.nl{href}"
-            
-            title = "Без названия"
-            title_tag = art.find(class_='hz-StructuredListing-title')
-            if title_tag: 
-                title = title_tag.text.strip()
-            
-            price_cents = 0
-            price_tag = art.find(class_='hz-Title')
-            if price_tag:
-                price_text = price_tag.text.strip().replace('.', '').replace(',', '.')
-                m = re.search(r'(\d+(?:\.\d+)?)', price_text)
-                if m: 
-                    price_cents = int(float(m.group(1)) * 100)
-            
             views, favs = 0, 0
             if FETCH_DETAILS:
-                views, favs = get_item_details(full_url)
+                views, favs = get_item_details(item_url)
                 time.sleep(random.uniform(1, 2))
                 
             parsed_items.append({
                 "id": item_id,
-                "title": title,
-                "publication_date": "", 
+                "title": item.get("title", "Без названия"),
+                "publication_date": item.get("date", ""),
                 "parsing_date": datetime.now(timezone.utc).isoformat(),
                 "category": raw_url, 
-                "price_cents": price_cents,
+                "price_cents": item.get("priceInfo", {}).get("priceCents"),
                 "views_count": views,
                 "favorites_count": favs,
-                "url": full_url,
+                "url": item_url,
                 "last_seen": datetime.now(timezone.utc).isoformat()
             })
             
