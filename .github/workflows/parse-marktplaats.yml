@@ -2,24 +2,24 @@ name: Parse Marktplaats
 
 on:
   schedule:
-    # Запуск каждые 3 часа (в 00:00, 03:00, 06:00, 09:00 и т.д. по UTC)
-    - cron: '0 */3 * * *' 
-  workflow_dispatch:    # Ручной запуск
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-parser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip' # Включаем кэш зависимостей
-
+          cache: 'pip'
+          
       - name: Install dependencies
         run: pip install -r requirements.txt
+        
+      - name: Install Playwright Browsers
+        run: playwright install --with-deps chromium
         
       - name: Run parser
         env:
