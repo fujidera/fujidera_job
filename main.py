@@ -36,7 +36,7 @@ def get_updates(offset):
     except Exception: pass
     return []
 
-def wait_for_text(last_id, timeout_minutes=10):
+def wait_for_text(last_id, timeout_minutes=15):
     start = time.time()
     while time.time() - start < timeout_minutes * 60:
         updates = get_updates(offset=last_id + 1)
@@ -53,19 +53,25 @@ def send_tg(text):
         tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception: pass
 
-# --- ПАРСИНГ ДЕТАЛЕЙ КАРТОЧКИ (PLAYWRIGHT) ---
-async def get_listing_details(page, url, retries=2):
+# --- ПАРСИНГ ДЕТАЛЕЙ ---
+async def get_listing_details(page, item_data, retries=2):
+    url = item_data["url"]
+    cat_name = item_data["category"]
+    
     for attempt in range(retries):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            try: await asyncio.wait_for(page.wait_for_selector("body", timeout=5000), timeout=6.0)
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+            try: await page.wait_for_selector("h1", timeout=5000)
             except: return None
 
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
 
+            if "Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text:
+                return None
+
             if "Website" in page_text or "Bezoek website" in page_text:
-                return None # Пропускаем магазины
+                return None 
 
             views = 0
             v_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
@@ -80,6 +86,8 @@ async def get_listing_details(page, url, retries=2):
                 title_el = page.locator("h1").first
                 if await title_el.count() > 0: title = (await title_el.inner_text()).strip()
             except: pass
+
+            if title == "Без названия" or not title: return None
 
             posted_date = ""
             try:
@@ -102,7 +110,7 @@ async def get_listing_details(page, url, retries=2):
             item_id = url.split('/')[-1]
             return {
                 "id": item_id, "title": title, "publication_date": posted_date,
-                "parsing_date": datetime.now(timezone.utc).isoformat(), "category": "Custom",
+                "parsing_date": datetime.now(timezone.utc).isoformat(), "category": cat_name,
                 "price_cents": price_cents, "views_count": views, "favorites_count": favorites,
                 "url": url, "last_seen": datetime.now(timezone.utc).isoformat()
             }
@@ -110,24 +118,22 @@ async def get_listing_details(page, url, retries=2):
             if attempt == retries - 1: return None
             await asyncio.sleep(1)
 
-async def process_batch(batch_urls):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-        tasks = [await context.new_page() for _ in range(len(batch_urls))]
-
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*[get_listing_details(tasks[i], batch_urls[i]) for i in range(len(batch_urls))], return_exceptions=True),
-                timeout=45.0
-            )
-        except asyncio.TimeoutError:
-            results = []
-        await browser.close()
-        return [r for r in results if isinstance(r, dict)]
+async def process_batch(context, batch_data):
+    tasks = [await context.new_page() for _ in range(len(batch_data))]
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*[get_listing_details(tasks[i], batch_data[i]) for i in range(len(batch_data))], return_exceptions=True),
+            timeout=60.0
+        )
+    except asyncio.TimeoutError:
+        results = []
+    finally:
+        for t in tasks: await t.close()
+    return [r for r in results if isinstance(r, dict)]
 
 # --- СБОР ССЫЛОК СО СТРАНИЦ ---
-async def get_links_from_page(page, url):
+async def get_links_from_page(context, url):
+    page = await context.new_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         await page.wait_for_selector("a[href*='/v/'], a[href*='/a/']", timeout=10000)
@@ -143,14 +149,36 @@ async def get_links_from_page(page, url):
         return list(set(res))
     except Exception:
         return []
+    finally:
+        await page.close()
 
-# --- ЗАПИСЬ В БАЗУ (БЕЗОПАСНЫМИ ЧАНКАМИ ПО 50 ШТУК) ---
+# --- ПОСТРОЕНИЕ URL С ПАГИНАЦИЕЙ ---
+def build_page_url(base_url, page_num):
+    if page_num == 1:
+        return base_url
+        
+    if '#' in base_url:
+        path, fragment = base_url.split('#', 1)
+        fragment = '#' + fragment
+    else:
+        path, fragment = base_url, ''
+        
+    path = re.sub(r'/p/\d+/?', '', path)
+    path = path.rstrip('/')
+    
+    if '/l/' in path:
+        return f"{path}/p/{page_num}/{fragment}"
+    elif '/q/' in path:
+        return f"{path}/p/{page_num}/{fragment}"
+    
+    return base_url
+
+# --- ЗАПИСЬ В БАЗУ ---
 def process_and_save(parsed_items):
-    if not parsed_items: return
+    if not parsed_items: return 0
     
     chunk_size = 50
     new_count = 0
-    updated_count = 0
     
     for i in range(0, len(parsed_items), chunk_size):
         chunk = parsed_items[i:i + chunk_size]
@@ -161,7 +189,6 @@ def process_and_save(parsed_items):
             response = supabase.table("marktplaats_listings").select("id, price_cents").in_("id", ids_to_check).execute()
             existing_data = {row["id"]: row["price_cents"] for row in response.data}
         except Exception as e: 
-            logger.error(f"Ошибка чтения из Supabase: {e}")
             continue
 
         new_listings, updated_listings = [], []
@@ -193,93 +220,69 @@ def process_and_save(parsed_items):
                         "views_count": item["views_count"],
                         "favorites_count": item["favorites_count"]
                     }).eq("id", item["id"]).execute()
-                updated_count += len(updated_listings)
         except Exception as e:
             logger.error(f"Ошибка записи в Supabase: {e}")
             
-    logger.info(f"Сохранено в базу: {new_count} новых, {updated_count} обновленных.")
+    return new_count
 
 # --- ГЛАВНЫЙ ПРОЦЕСС ---
-async def run_playwright(raw_url, pages_count, is_auto):
-    all_links = []
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-        page = await context.new_page()
-
-        if is_auto:
-            logger.info("Режим АВТО: собираем список категорий с главной страницы...")
-            send_tg("⏳ Собираю список всех категорий с главной страницы...")
-            await page.goto("https://www.marktplaats.nl/", wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(3000)
-            
-            try:
-                categories = await page.evaluate("() => window.__CONFIG__.categoryLinks")
-            except:
-                categories = []
-                
-            if not categories: return 0
-
-            for cat in categories:
-                cat_id = cat["id"]
-                for page_num in range(pages_count):
-                    offset = page_num * 30
-                    url = f"https://www.marktplaats.nl/lrp/api/search?l1CategoryId={cat_id}&limit=30&offset={offset}"
-                    r = tg_session.get(url, timeout=10)
-                    if r.status_code == 200:
-                        items = r.json().get("listings", [])
-                        if not items: break
-                        for item in items:
-                            item_id = item.get("itemId")
-                            if item_id:
-                                t = "a" if item_id.startswith("a") else "v"
-                                all_links.append(f"https://www.marktplaats.nl/{t}/{item_id}")
-                    await asyncio.sleep(0.5)
-        else:
-            logger.info(f"Режим ССЫЛКИ: {raw_url}")
-            if '#' in raw_url:
-                path_query, fragment = raw_url.split('#', 1)
-                fragment = '#' + fragment
-            else:
-                path_query, fragment = raw_url, ''
-                
-            path_query = re.sub(r'/p/\d+', '', path_query)
-
-            for page_num in range(1, pages_count + 1):
-                if '/l/' in path_query:
-                    url = f"{path_query}p/{page_num}/{fragment}" if page_num > 1 else f"{path_query}{fragment}"
-                else:
-                    url = f"{path_query}&page={page_num}{fragment}" if page_num > 1 else f"{path_query}{fragment}"
-                
-                logger.info(f"Загружаю страницу {page_num}...")
-                links = await get_links_from_page(page, url)
-                all_links.extend(links)
-
-        await browser.close()
-
-    all_links = list(set(all_links))
-    logger.info(f"Всего найдено {len(all_links)} ссылок. Начинаем парсинг просмотров...")
-    send_tg(f"🔍 Найдено {len(all_links)} товаров. Начинаю сбор данных...")
-
+async def run_playwright(links_list, pages_count):
     total_saved = 0
     batch_size = 5
     
-    # ПАРСИМ И СОХРАНЯЕМ ПО ХОДУ ДЕЛА
-    for i in range(0, len(all_links), batch_size):
-        batch = all_links[i:i + batch_size]
-        batch_results = await process_batch(batch)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        context = await browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={'width': 1920, 'height': 1080}
+        )
         
-        if batch_results:
-            process_and_save(batch_results) # Сохраняем сразу после каждого батча!
-            total_saved += len(batch_results)
-        
-        if (i + len(batch)) % 100 == 0:
-            send_tg(f"⏳ Обработано {i + len(batch)} из {len(all_links)}...")
-            
-        logger.info(f"Обработано {i + len(batch)}/{len(all_links)}")
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', { get: () => ['nl-NL', 'nl'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        """)
 
+        for idx, base_url in enumerate(links_list, 1):
+            logger.info(f"--- Обработка ссылки {idx}/{len(links_list)}: {base_url} ---")
+            
+            cat_slug = "Other"
+            if "/l/" in base_url:
+                match = re.search(r'/l/([^/]+)/', base_url)
+                if match: cat_slug = match.group(1)
+                
+            send_tg(f"📂 Ссылка {idx}/{len(links_list)}: <b>{cat_slug}</b>")
+
+            all_links = []
+            for page_num in range(1, pages_count + 1):
+                url = build_page_url(base_url, page_num)
+                links = await get_links_from_page(context, url)
+                all_links.extend(links)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+            all_links = list(set(all_links))
+            if not all_links:
+                logger.info(f"Ссылок не найдено для {base_url}")
+                continue
+                
+            send_tg(f"🔍 Найдено {len(all_links)} товаров в {cat_slug}. Начинаю парсинг...")
+            
+            for i in range(0, len(all_links), batch_size):
+                batch_urls = all_links[i:i + batch_size]
+                batch_data = [{"url": u, "category": cat_slug} for u in batch_urls]
+                
+                batch_results = await process_batch(context, batch_data)
+                
+                if batch_results:
+                    saved = process_and_save(batch_results)
+                    total_saved += saved
+                
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            send_tg(f"✅ Категория <b>{cat_slug}</b> готова. Обработано {len(all_links)} товаров.")
+
+        await browser.close()
     return total_saved
 
 def main():
@@ -289,32 +292,31 @@ def main():
     updates = get_updates(offset=0)
     last_update_id = updates[-1]["update_id"] if updates else 0
 
-    send_tg("1️⃣ Скинь ссылку (например: <code>https://www.marktplaats.nl/l/computers-en-software/</code>)\nИЛИ напиши <b>ALL</b>, чтобы спарсить все категории автоматом.")
-    raw_url, last_update_id = wait_for_text(last_update_id, 10)
+    send_tg("1️⃣ Скинь ссылки на категории, которые нужно спарсить (каждую с новой строки).")
+    raw_text, last_update_id = wait_for_text(last_update_id, 15)
     
-    if not raw_url:
+    if not raw_text:
         send_tg("❌ Отмена.")
         return
 
-    is_auto = raw_url.strip().upper() == "ALL" or raw_url.strip().upper() == "ВСЕ"
+    links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
+    
+    if not links_list:
+        send_tg("❌ Не найдено валидных ссылок. Отмена.")
+        return
 
-    if is_auto:
-        send_tg("2️⃣ Сколько страниц спарсить <b>с каждой категории</b>? (Напиши число, например 3).")
-    else:
-        send_tg("2️⃣ Сколько страниц спарсить? Напиши число.")
-        
+    send_tg(f"✅ Принято {len(links_list)} ссылок.")
+    
+    send_tg("2️⃣ Сколько страниц спарсить <b>с каждой ссылки</b>? Напиши число.")
     pages_str, last_update_id = wait_for_text(last_update_id, 10)
     if not pages_str: return
     try: pages = int(pages_str.strip())
     except ValueError: pages = 1
 
-    if is_auto:
-        send_tg(f"✅ Режим АВТО включен. Парсим по {pages} страниц с каждой категории.")
-    else:
-        send_tg(f"✅ Поехали! Парсим {pages} страниц.")
+    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок.")
 
     try:
-        total_saved = asyncio.run(run_playwright(raw_url, pages, is_auto))
+        total_saved = asyncio.run(run_playwright(links_list, pages))
         if total_saved > 0:
             send_tg(f"🏁 Парсинг завершен! Успешно обработано и записано {total_saved} объявлений.")
         else:
