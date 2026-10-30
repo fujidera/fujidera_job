@@ -1,12 +1,12 @@
-import os
-import time
-import random
-import logging
+import asyncio
 import re
-import sqlite3
+import os
+import random
+import time
+import logging
 from datetime import datetime, timezone
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+from playwright.async_api import async_playwright
 from curl_cffi import requests as curl_requests
 from supabase import create_client, Client
 
@@ -18,136 +18,231 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 TG_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-FETCH_DETAILS = True
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-session = curl_requests.Session(impersonate="chrome120")
-session.headers.update({"Accept-Language": "nl-NL,nl;q=0.9"})
+tg_session = curl_requests.Session()
 
-CATEGORIES_MAP = {
-    "antiek-en-kunst": 1, "audio-tv-en-foto": 31, "auto-kopen": 91,
-    "auto-onderdelen": 2600, "auto-diversen": 48, "boeken": 201,
-    "caravans-en-kamperen": 289, "cd-s-en-dvd-s": 1744, "computers-en-software": 322,
-    "contacten-en-berichten": 378, "diensten-en-vakmensen": 1098, "dieren-en-toebehoren": 395,
-    "doe-het-zelf-en-verbouw": 239, "fietsen-en-brommers": 445, "hobby-en-vrije-tijd": 1099,
-    "huis-en-inrichting": 504, "huizen-en-kamers": 1032, "kinderen-en-baby-s": 565,
-    "kleding-dames": 621, "kleding-heren": 1776, "motoren": 678,
-    "muziek-en-instrumenten": 728, "postzegels-en-munten": 1784, "sieraden-tassen-en-uiterlijk": 1826,
-    "spelcomputers-en-games": 356, "sport-en-fitness": 784, "telecommunicatie": 820,
-    "tickets-en-kaartjes": 1984, "tuin-en-terras": 1847, "vacatures": 167,
-    "vakantie": 856, "verzamelen": 895, "watersport-en-boten": 976,
-    "witgoed-en-apparatuur": 537, "zakelijke-goederen": 1085, "diversen": 428
-}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
+]
 
+# --- TELEGRAM ЛОГИКА ---
 def get_updates(offset):
     try:
-        r = session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=40)
+        r = tg_session.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=40)
         if r.status_code == 200 and r.json().get("ok"):
             return r.json().get("result", [])
     except Exception: pass
     return []
 
-def wait_for_text(last_update_id, timeout_minutes=10):
-    start_time = time.time()
-    while time.time() - start_time < timeout_minutes * 60:
-        updates = get_updates(offset=last_update_id + 1)
-        for update in updates:
-            last_update_id = max(last_update_id, update["update_id"])
-            msg_obj = update.get("message")
-            if msg_obj and "text" in msg_obj:
-                return msg_obj["text"], last_update_id
+def wait_for_text(last_id, timeout_minutes=10):
+    start = time.time()
+    while time.time() - start < timeout_minutes * 60:
+        updates = get_updates(offset=last_id + 1)
+        for up in updates:
+            last_id = max(last_id, up["update_id"])
+            if "message" in up and "text" in up["message"]:
+                return up["message"]["text"], last_id
         time.sleep(2)
-    return None, last_update_id
+    return None, last_id
 
 def send_tg(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
     try:
-        session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception: pass
 
-def build_api_url(raw_url):
-    """Превращает ссылку юзера в правильный запрос к API"""
-    price_from, price_to = None, None
-    if "#" in raw_url:
-        hash_part = raw_url.split("#")[1]
-        f_match = re.search(r'PriceCentsFrom:(\d+)', hash_part)
-        t_match = re.search(r'PriceCentsTo:(\d+)', hash_part)
-        if f_match: price_from = int(f_match.group(1)) // 100
-        if t_match: price_to = int(t_match.group(1)) // 100
-        raw_url = raw_url.split("#")[0]
+# --- ТВОЯ ТЕХНИЧЕСКАЯ ЧАСТЬ (ПАРСИНГ КАРТОЧКИ) ---
+async def get_listing_details(page, url, retries=2):
+    for attempt in range(retries):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await asyncio.wait_for(page.wait_for_selector("body", timeout=5000), timeout=6.0)
+            except:
+                return None
 
-    base_api = "https://www.marktplaats.nl/lrp/api/search?limit=30"
+            await page.wait_for_timeout(500)
+            page_text = await page.inner_text("body")
+
+            # ФИЛЬТР: Магазин
+            website_link = page.locator("a:has-text('Website'), a:has-text('Bezoek website')")
+            if await website_link.count() > 0 and await website_link.is_visible():
+                logger.info("   ⏭️ Пропущено (магазин)")
+                return None
+
+            # 1. Просмотры
+            views = 0
+            views_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
+            if views_match:
+                views = int(views_match.group(1).replace('.', ''))
+
+            # 2. Избранное
+            favorites = 0
+            fav_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bewaard', page_text, re.IGNORECASE)
+            if fav_match:
+                favorites = int(fav_match.group(1).replace('.', ''))
+
+            # 3. Заголовок
+            title = "Без названия"
+            try:
+                title_el = page.locator("h1").first
+                if await title_el.count() > 0:
+                    title = (await title_el.inner_text()).strip()
+            except: pass
+
+            # 4. Дата
+            posted_date = ""
+            try:
+                date_title_el = page.locator(".Report-module-stat[title]").first
+                if await date_title_el.count() > 0:
+                    title_date = await date_title_el.get_attribute("title")
+                    if title_date: posted_date = title_date
+            except: pass
+
+            # 5. Цена
+            price_cents = 0
+            try:
+                price_el = page.locator("div.ListingHeader-module-price, div.ListingHeader-price, span.price").first
+                if await price_el.count() > 0:
+                    raw_price = (await price_el.inner_text()).strip()
+                    # Переводим "€ 1.500,00" в 150000 центов
+                    p_text = raw_price.replace('€', '').replace('.', '').replace(',', '.').strip()
+                    m = re.search(r'(\d+(?:\.\d+)?)', p_text)
+                    if m: price_cents = int(float(m.group(1)) * 100)
+            except: pass
+
+            item_id = url.split('/')[-1]
+
+            return {
+                "id": item_id,
+                "title": title,
+                "publication_date": posted_date,
+                "parsing_date": datetime.now(timezone.utc).isoformat(),
+                "category": "Custom",
+                "price_cents": price_cents,
+                "views_count": views,
+                "favorites_count": favorites,
+                "url": url,
+                "last_seen": datetime.now(timezone.utc).isoformat()
+            }
+
+        except Exception as e:
+            if attempt == retries - 1:
+                logger.error(f"   ❌ Ошибка: {url} | {e}")
+                return None
+            await asyncio.sleep(2)
+
+async def process_batch(batch_urls):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True) # ВАЖНО
+        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+        
+        tasks = []
+        for _ in range(len(batch_urls)):
+            tasks.append(await context.new_page())
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[get_listing_details(tasks[i], batch_urls[i]) for i in range(len(batch_urls))],
+                    return_exceptions=True
+                ),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            results = []
+
+        await browser.close()
+        return [res for res in results if isinstance(res, dict)]
+
+# --- СБОР ССЫЛОК И ГЛАВНАЯ ЛОГИКА ---
+async def parse_marktplaats(raw_url, max_pages):
+    all_links = []
     
-    if "/l/" in raw_url:
-        match = re.search(r'/l/([^/]+)/', raw_url)
-        if match:
-            slug = match.group(1)
-            cat_id = CATEGORIES_MAP.get(slug)
-            if cat_id:
-                base_api += f"&l1CategoryId={cat_id}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+        page = await context.new_page()
+
+        if '#' in raw_url:
+            path_with_query, fragment = raw_url.split('#', 1)
+            fragment = '#' + fragment
+        else:
+            path_with_query, fragment = raw_url, ''
+        
+        if '?' in path_with_query:
+            path, query = path_with_query.split('?', 1)
+            query = '?' + query
+        else:
+            path, query = path_with_query, ''
+        
+        path = re.sub(r'/p/\d+', '', path)
+        query = re.sub(r'&?page=\d+', '', query)
+
+        for page_num in range(1, max_pages + 1):
+            if page_num == 1:
+                url = f"{path}{query}{fragment}"
             else:
-                base_api += f"&query={slug}"
-    elif "/q/" in raw_url:
-        match = re.search(r'/q/([^/]+)/', raw_url)
-        if match:
-            query = match.group(1).replace("+", "%20")
-            base_api += f"&query={query}"
+                if '/l/' in path:
+                    url = f"{path}p/{page_num}/{query}{fragment}"
+                else:
+                    url = f"{path}{query}&page={page_num}{fragment}" if query else f"{path}?page={page_num}{fragment}"
+            
+            logger.info(f"🔍 Загружаю страницу {page_num}...")
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_selector("a[href*='/v/'], a[href*='/a/']", timeout=10000)
+                await page.wait_for_timeout(2000)
+                
+                links = page.locator("a[href*='/v/'], a[href*='/a/']")
+                link_count = await links.count()
+                
+                for i in range(link_count):
+                    href = await links.nth(i).get_attribute("href")
+                    if href:
+                        if not href.startswith('http'):
+                            href = 'https://www.marktplaats.nl' + href
+                        clean_href = href.split('?')[0]
+                        if clean_href not in all_links:
+                            all_links.append(clean_href)
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка загрузки страницы {page_num}: {e}")
 
-    if price_from is not None: base_api += f"&priceFrom={price_from}"
-    if price_to is not None: base_api += f"&priceTo={price_to}"
+        await browser.close()
+
+    if not all_links:
+        return []
+
+    logger.info(f"✅ Найдено {len(all_links)} объявлений. Парсю детали...")
     
-    return base_api
-
-def get_item_details(item_url):
-    try:
-        resp = session.get(item_url, timeout=15, allow_redirects=True)
-        if resp.status_code != 200: 
-            return 0, 0
-        html = resp.text
+    batch_size = 5
+    found_items = []
+    
+    for i in range(0, len(all_links), batch_size):
+        batch = all_links[i:i + batch_size]
+        logger.info(f"   📦 Обработка батча #{i//batch_size + 1} ({len(batch)} шт.)...")
         
-        if "We hebben overal gezocht" in html:
-            logger.warning(f"404: {item_url}")
-            return 0, 0
-
-        views, favs = 0, 0
-        v_match = re.search(r'(\d+)\s*x\s*bekeken', html, re.IGNORECASE)
-        if v_match: views = int(v_match.group(1))
+        batch_results = await process_batch(batch)
+        found_items.extend(batch_results)
         
-        f_match = re.search(r'(\d+)\s*x\s*bewaard', html, re.IGNORECASE)
-        if f_match: favs = int(f_match.group(1))
-        
-        return views, favs
-    except Exception as e:
-        logger.error(f"Ошибка парсинга {item_url}: {e}")
-        return 0, 0
+        await asyncio.sleep(random.uniform(1.5, 4.0))
 
-def fetch_json(url):
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code in [403, 429]: return None
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e: 
-        logger.error(f"Ошибка API: {e}")
-        return None
+    return found_items
 
-def init_db():
-    conn = sqlite3.connect('marktplaats_parser.db')
-    conn.execute('''CREATE TABLE IF NOT EXISTS snapshots 
-                    (id INTEGER PRIMARY KEY, listing_id TEXT, price_cents INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    return conn
-
-def process_and_save(parsed_items, conn):
+# --- ЗАПИСЬ В БАЗУ И УВЕДОМЛЕНИЯ ---
+def process_and_save(parsed_items):
     if not parsed_items: return
-    cursor = conn.cursor()
     ids_to_check = [item["id"] for item in parsed_items]
     
     existing_data = {}
     try:
         response = supabase.table("marktplaats_listings").select("id, price_cents").in_("id", ids_to_check).execute()
         existing_data = {row["id"]: row["price_cents"] for row in response.data}
-    except Exception: return
+    except Exception as e: 
+        logger.error(f"Ошибка чтения из Supabase: {e}")
+        return
 
     new_listings, updated_listings = [], []
     
@@ -157,8 +252,6 @@ def process_and_save(parsed_items, conn):
         
         if item_id not in existing_data:
             new_listings.append(item)
-            cursor.execute("INSERT INTO snapshots (listing_id, price_cents) VALUES (?, ?)", (item_id, current_price))
-            
             price_str = f"{current_price / 100:.2f} €" if current_price else "См. описание"
             msg = (f"🆕 <b>Новое!</b>\n📦 <b>{item['title']}</b>\n"
                    f"💰 {price_str}\n"
@@ -169,12 +262,9 @@ def process_and_save(parsed_items, conn):
             updated_listings.append(item)
             old_price = existing_data[item_id]
             if current_price != old_price:
-                cursor.execute("INSERT INTO snapshots (listing_id, price_cents) VALUES (?, ?)", (item_id, current_price))
                 old_str = f"{old_price / 100:.2f} €" if old_price else "?"
                 new_str = f"{current_price / 100:.2f} €" if current_price else "?"
                 send_tg(f"🔄 <b>Цена изменилась!</b>\n📦 <b>{item['title']}</b>\nБыло: <s>{old_str}</s>\nСтало: <b>{new_str}</b>\n🔗 <a href='{item['url']}'>Открыть</a>")
-
-    conn.commit()
 
     try:
         if new_listings:
@@ -196,7 +286,6 @@ def process_and_save(parsed_items, conn):
 def main():
     logger.info("Запуск...")
     if not TG_TOKEN or not TG_CHAT_ID:
-        logger.error("Нет токена/чата ТГ.")
         return
 
     updates = get_updates(offset=0)
@@ -217,59 +306,18 @@ def main():
     try: pages = int(pages_str.strip())
     except ValueError: pages = 1
 
-    send_tg(f"✅ Поехали! Парсим {pages} страниц.")
+    send_tg(f"✅ Поехали! Запускаю невидимый браузер для парсинга {pages} страниц.")
     
-    api_url = build_api_url(raw_url)
-    logger.info(f"API URL: {api_url}")
-
-    conn = init_db()
-    for page in range(pages):
-        url = f"{api_url}&offset={page * 30}"
-        logger.info(f"Загружаем страницу {page+1}")
-        data = fetch_json(url)
-        if not data: break
-        
-        items = data.get("listings", [])
-        if not items: 
-            logger.warning(f"На странице {page+1} нет объявлений.")
-            break
-        
-        parsed_items = []
-        for item in items:
-            item_id = str(item.get("itemId")).strip()
-            if not item_id: continue
-            
-            # Берем ссылку из API (vipUrl), если нет — склеиваем вручную
-            raw_href = item.get("vipUrl") or item.get("url") or f"/v/{item_id}"
-            if raw_href.startswith("/"):
-                item_url = f"https://www.marktplaats.nl{raw_href}"
-            else:
-                item_url = raw_href
-                
-            views, favs = 0, 0
-            if FETCH_DETAILS:
-                views, favs = get_item_details(item_url)
-                time.sleep(random.uniform(1, 2))
-                
-            parsed_items.append({
-                "id": item_id,
-                "title": item.get("title", "Без названия"),
-                "publication_date": item.get("date", ""),
-                "parsing_date": datetime.now(timezone.utc).isoformat(),
-                "category": raw_url, 
-                "price_cents": item.get("priceInfo", {}).get("priceCents"),
-                "views_count": views,
-                "favorites_count": favs,
-                "url": item_url,
-                "last_seen": datetime.now(timezone.utc).isoformat()
-            })
-            
-        process_and_save(parsed_items, conn)
-        time.sleep(random.uniform(1, 2))
-        
-    conn.close()
-    send_tg("🏁 Парсинг завершен!")
-    logger.info("Работа завершена.")
+    try:
+        results = asyncio.run(parse_marktplaats(raw_url, pages))
+        if results:
+            process_and_save(results)
+            send_tg(f"🏁 Парсинг завершен! Собрано и записано {len(results)} объявлений (без магазинов).")
+        else:
+            send_tg("⚠️ Парсинг завершен, но ничего не найдено.")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        send_tg(f"💥 Ошибка при выполнении: {e}")
 
 if __name__ == "__main__":
     main()
