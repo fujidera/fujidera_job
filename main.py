@@ -89,7 +89,6 @@ def wait_for_tg_input(timeout_minutes=10):
 
 def build_api_url(raw_url):
     """Превращает любую ссылку Marktplaats в запрос к API"""
-    # 1. Отделяем хэш (фильтры цен)
     price_from, price_to = None, None
     if "#" in raw_url:
         hash_part = raw_url.split("#")[1]
@@ -101,7 +100,6 @@ def build_api_url(raw_url):
 
     base_api = "https://www.marktplaats.nl/lrp/api/search?limit=30"
     
-    # 2. Если это категория (/l/...)
     if "/l/" in raw_url:
         match = re.search(r'/l/([^/]+)/', raw_url)
         if match:
@@ -110,17 +108,13 @@ def build_api_url(raw_url):
             if cat_id:
                 base_api += f"&l1CategoryId={cat_id}"
             else:
-                # Если категория неизвестна, пробуем искать по слову из ссылки
                 base_api += f"&query={slug}"
-                
-    # 3. Если это поиск (/q/...)
     elif "/q/" in raw_url:
         match = re.search(r'/q/([^/]+)/', raw_url)
         if match:
             query = match.group(1).replace("+", "%20")
             base_api += f"&query={query}"
 
-    # 4. Добавляем цены
     if price_from is not None: base_api += f"&priceFrom={price_from}"
     if price_to is not None: base_api += f"&priceTo={price_to}"
     
@@ -144,23 +138,33 @@ def fetch_json(url):
         return None
 
 def get_item_details(item_id):
-    """Строим ссылку ТОЛЬКО из ID и достаем просмотры."""
+    """Строим ссылку ТОЛЬКО из ID и достаем просмотры НАПРЯМУЮ ИЗ HTML."""
     item_id = str(item_id).strip()
     item_type = "a" if item_id.startswith("a") else "v"
     url = f"https://www.marktplaats.nl/{item_type}/{item_id}"
     
     try:
         resp = session.get(url, timeout=15)
-        if resp.status_code != 200: return 0, 0
+        if resp.status_code != 200: 
+            return 0, 0
         html = resp.text
         
-        match = re.search(r'window\.__CONFIG__\s*=\s*(\{.+?\});', html, re.DOTALL)
-        if match:
-            data = json.loads(match.group(1))
-            stats = data.get("listing", {}).get("stats", {})
-            return stats.get("viewCount", 0), stats.get("favoritedCount", 0)
-    except Exception: pass
-    return 0, 0
+        views, favorites = 0, 0
+        
+        # Ищем просмотры (например, <b>84x</b> bekeken)
+        v_match = re.search(r'<b>(\d+)x</b>\s*bekeken', html)
+        if v_match: 
+            views = int(v_match.group(1))
+        
+        # Ищем избранное (например, <b>0x</b> bewaard)
+        f_match = re.search(r'<b>(\d+)x</b>\s*bewaard', html)
+        if f_match: 
+            favorites = int(f_match.group(1))
+            
+        return views, favorites
+    except Exception as e:
+        logger.error(f"Ошибка получения просмотров для {item_id}: {e}")
+        return 0, 0
 
 def send_telegram(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
@@ -238,7 +242,6 @@ def main():
     conn = init_db()
     
     for page in range(pages):
-        # Подставляем offset для пагинации
         url = f"{api_base}&offset={page * 30}"
         data = fetch_json(url)
         if not data: break
@@ -267,7 +270,6 @@ def main():
                 views, favorites = get_item_details(item_id)
                 time.sleep(random.uniform(1, 2))
             
-            # Берем ID категории из словаря или пишем Custom
             cat_id = "Custom"
             if "/l/" in raw_url:
                 slug = raw_url.split("/l/")[1].split("/")[0]
