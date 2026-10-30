@@ -3,3 +3,4 @@ supabase>=2.0.0
 aiogram>=3.0.0
 python-dotenv>=1.0.0
 beautifulsoup4
+playwright
