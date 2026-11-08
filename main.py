@@ -27,6 +27,43 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
 ]
 
+# --- СПИСОК ССЫЛОК ПО УМОЛЧАНИЮ (ЕСЛИ БОТ МОЛЧИТ 15 МИНУТ) ---
+DEFAULT_LINKS = [
+    "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/auto-s/#PriceCentsFrom:50000|PriceCentsTo:100000",
+    "https://www.marktplaats.nl/l/auto-onderdelen/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/auto-diversen/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/boeken/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/caravans-en-kamperen/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/cd-s-en-dvd-s/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/computers-en-software/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/contacten-en-berichten/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/diensten-en-vakmensen/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/dieren-en-toebehoren/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/doe-het-zelf-en-verbouw/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/fietsen-en-brommers/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/hobby-en-vrije-tijd/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/huis-en-inrichting/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/huizen-en-kamers/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/kinderen-en-baby-s/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/kleding-dames/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/kleding-heren/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/motoren/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/muziek-en-instrumenten/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/sieraden-tassen-en-uiterlijk/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/spelcomputers-en-games/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/sport-en-fitness/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/telecommunicatie/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/tickets-en-kaartjes/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/tuin-en-terras/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/watersport-en-boten/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/witgoed-en-apparatuur/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/zakelijke-goederen/#PriceCentsFrom:12000|PriceCentsTo:95000",
+    "https://www.marktplaats.nl/l/diversen/#PriceCentsFrom:12000|PriceCentsTo:95000"
+]
+DEFAULT_PAGES = 3
+
 # --- TELEGRAM ЛОГИКА ---
 def get_updates(offset):
     try:
@@ -173,7 +210,7 @@ def build_page_url(base_url, page_num):
     
     return base_url
 
-# --- ЗАПИСЬ В БАЗУ ---
+# --- ЗАПИСЬ В БАЗУ (С ПРОВЕРКОЙ НА ДУБЛИ) ---
 def process_and_save(parsed_items):
     if not parsed_items: return 0
     
@@ -198,15 +235,11 @@ def process_and_save(parsed_items):
             current_price = item["price_cents"]
             
             if item_id not in existing_data:
+                # Этого объявления нет в базе — добавляем
                 new_listings.append(item)
-                price_str = f"{current_price / 100:.2f} €" if current_price else "См. описание"
-                send_tg(f"🆕 <b>Новое!</b>\n📦 <b>{item['title']}</b>\n💰 {price_str}\n👁 {item['views_count']} | ❤️ {item['favorites_count']}\n🔗 <a href='{item['url']}'>Открыть</a>")
             else:
+                # Объявление уже есть — просто обновляем данные, не создаем дубль
                 updated_listings.append(item)
-                if existing_data[item_id] != current_price:
-                    old_str = f"{existing_data[item_id] / 100:.2f} €" if existing_data[item_id] else "?"
-                    new_str = f"{current_price / 100:.2f} €" if current_price else "?"
-                    send_tg(f"🔄 <b>Цена изменилась!</b>\n📦 <b>{item['title']}</b>\nБыло: <s>{old_str}</s>\nСтало: <b>{new_str}</b>\n🔗 <a href='{item['url']}'>Открыть</a>")
 
         try:
             if new_listings:
@@ -252,7 +285,7 @@ async def run_playwright(links_list, pages_count):
                 match = re.search(r'/l/([^/]+)/', base_url)
                 if match: cat_slug = match.group(1)
                 
-            send_tg(f"📂 Ссылка {idx}/{len(links_list)}: <b>{cat_slug}</b>")
+            send_tg(f"📂 Начинаю: <b>{cat_slug}</b> ({idx}/{len(links_list)})")
 
             all_links = []
             for page_num in range(1, pages_count + 1):
@@ -261,12 +294,12 @@ async def run_playwright(links_list, pages_count):
                 all_links.extend(links)
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             
+            # Убираем дубликаты ссылок внутри одной категории
             all_links = list(set(all_links))
             if not all_links:
-                logger.info(f"Ссылок не найдено для {base_url}")
                 continue
                 
-            send_tg(f"🔍 Найдено {len(all_links)} товаров в {cat_slug}. Начинаю парсинг...")
+            new_in_category = 0
             
             for i in range(0, len(all_links), batch_size):
                 batch_urls = all_links[i:i + batch_size]
@@ -277,10 +310,14 @@ async def run_playwright(links_list, pages_count):
                 if batch_results:
                     saved = process_and_save(batch_results)
                     total_saved += saved
+                    new_in_category += saved
                 
                 await asyncio.sleep(random.uniform(1.0, 2.0))
 
-            send_tg(f"✅ Категория <b>{cat_slug}</b> готова. Обработано {len(all_links)} товаров.")
+            if new_in_category > 0:
+                send_tg(f"✅ <b>{cat_slug}</b> готова!\nДобавлено новых: <b>{new_in_category}</b> (из {len(all_links)} проверенных).")
+            else:
+                send_tg(f"✅ <b>{cat_slug}</b> готова. Новых товаров нет (все уже есть в базе).")
 
         await browser.close()
     return total_saved
@@ -292,35 +329,44 @@ def main():
     updates = get_updates(offset=0)
     last_update_id = updates[-1]["update_id"] if updates else 0
 
-    send_tg("1️⃣ Скинь ссылки на категории, которые нужно спарсить (каждую с новой строки).")
+    send_tg("1️⃣ Скинь ссылки (каждую с новой строки) ИЛИ ничего не пиши 15 минут, и я запущу дефолтный список из 32 категорий.")
+    
     raw_text, last_update_id = wait_for_text(last_update_id, 15)
     
-    if not raw_text:
-        send_tg("❌ Отмена.")
-        return
+    # ЛОГИКА ЕСЛИ ПОЛЬЗОВАТЕЛЬ НЕ ОТВЕТИЛ ИЛИ СКИНУЛ ПУСТОТУ
+    if not raw_text or not raw_text.strip():
+        send_tg("⏰ Время вышло (или пустое сообщение). Запускаю дефолтный список: 32 категории по 3 страницы.")
+        links_list = DEFAULT_LINKS
+        pages = DEFAULT_PAGES
+    else:
+        # ЕСЛИ ОТВЕТИЛ
+        links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
+        
+        if not links_list:
+            send_tg("⚠️ Не найдено ссылок. Запускаю дефолтный список: 32 категории по 3 страницы.")
+            links_list = DEFAULT_LINKS
+            pages = DEFAULT_PAGES
+        else:
+            send_tg(f"✅ Принято {len(links_list)} ссылок. Сколько страниц спарсить? (Если не ответишь за 15 мин, будет 3).")
+            pages_str, last_update_id = wait_for_text(last_update_id, 15)
+            
+            if not pages_str:
+                send_tg("⏰ Время вышло. Ставлю 3 страницы по умолчанию.")
+                pages = DEFAULT_PAGES
+            else:
+                try: pages = int(pages_str.strip())
+                except ValueError: 
+                    pages = DEFAULT_PAGES
+                    send_tg("⚠️ Не распознал число. Ставлю 3 страницы по умолчанию.")
 
-    links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
-    
-    if not links_list:
-        send_tg("❌ Не найдено валидных ссылок. Отмена.")
-        return
-
-    send_tg(f"✅ Принято {len(links_list)} ссылок.")
-    
-    send_tg("2️⃣ Сколько страниц спарсить <b>с каждой ссылки</b>? Напиши число.")
-    pages_str, last_update_id = wait_for_text(last_update_id, 10)
-    if not pages_str: return
-    try: pages = int(pages_str.strip())
-    except ValueError: pages = 1
-
-    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок.")
+    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок. Дубликаты будут проигнорированы.")
 
     try:
         total_saved = asyncio.run(run_playwright(links_list, pages))
         if total_saved > 0:
-            send_tg(f"🏁 Парсинг завершен! Успешно обработано и записано {total_saved} объявлений.")
+            send_tg(f"🏁 Парсинг завершен! Успешно добавлено {total_saved} новых объявлений.")
         else:
-            send_tg("⚠️ Ничего не найдено.")
+            send_tg("🏁 Парсинг завершен! Новых объявлений не найдено (всё уже было в базе).")
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         send_tg(f"💥 Ошибка: {e}")
