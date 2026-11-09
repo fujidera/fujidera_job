@@ -72,7 +72,7 @@ def get_updates(offset):
     except Exception: pass
     return []
 
-def wait_for_text(last_id, timeout_minutes=15):
+def wait_for_text(last_id, timeout_minutes=5): # <--- ИЗМЕНЕНО НА 5 МИНУТ
     start = time.time()
     while time.time() - start < timeout_minutes * 60:
         updates = get_updates(offset=last_id + 1)
@@ -312,9 +312,9 @@ def main():
     updates = get_updates(offset=0)
     last_update_id = updates[-1]["update_id"] if updates else 0
 
-    send_tg("1️⃣ Скинь ссылки (каждую с новой строки) ИЛИ ничего не пиши 15 минут, и я запущу дефолтный список из 32 категорий.")
+    send_tg("1️⃣ Скинь ссылки (каждую с новой строки) ИЛИ ничего не пиши 5 минут, и я запущу дефолтный список из 32 категорий.")
     
-    raw_text, last_update_id = wait_for_text(last_update_id, 15)
+    raw_text, last_update_id = wait_for_text(last_update_id, 5) # <--- 5 МИНУТ
     
     if not raw_text or not raw_text.strip():
         send_tg("⏰ Время вышло. Запускаю дефолтный список: 32 категории по 3 страницы.")
@@ -328,8 +328,8 @@ def main():
             links_list = DEFAULT_LINKS
             pages = DEFAULT_PAGES
         else:
-            send_tg(f"✅ Принято {len(links_list)} ссылок. Сколько страниц спарсить? (Если не ответишь за 15 мин, будет 3).")
-            pages_str, last_update_id = wait_for_text(last_update_id, 15)
+            send_tg(f"✅ Принято {len(links_list)} ссылок. Сколько страниц спарсить? (Если не ответишь за 5 мин, будет 3).")
+            pages_str, last_update_id = wait_for_text(last_update_id, 5) # <--- 5 МИНУТ
             
             if not pages_str:
                 send_tg("⏰ Время вышло. Ставлю 3 страницы по умолчанию.")
