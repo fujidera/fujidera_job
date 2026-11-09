@@ -5,6 +5,7 @@ import random
 import time
 import logging
 from datetime import datetime, timezone
+from collections import defaultdict
 
 from playwright.async_api import async_playwright
 from curl_cffi import requests as curl_requests
@@ -72,22 +73,93 @@ def get_updates(offset):
     except Exception: pass
     return []
 
-def wait_for_text(last_id, timeout_minutes=5): # <--- ИЗМЕНЕНО НА 5 МИНУТ
+def wait_for_response(last_id, timeout_minutes=5):
     start = time.time()
     while time.time() - start < timeout_minutes * 60:
         updates = get_updates(offset=last_id + 1)
         for up in updates:
             last_id = max(last_id, up["update_id"])
             if "message" in up and "text" in up["message"]:
-                return up["message"]["text"], last_id
+                text = up["message"]["text"].strip()
+                if text.lower().startswith("/stats"):
+                    send_stats()
+                    return "__stats__", last_id
+                return text, last_id
+            if "callback_query" in up:
+                data = up["callback_query"]["data"]
+                cb_id = up["callback_query"]["id"]
+                tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id})
+                if data == "cmd_stats":
+                    send_stats()
+                    return "__stats__", last_id
+                return data, last_id
         time.sleep(2)
     return None, last_id
 
-def send_tg(text):
+def send_tg(text, reply_markup=None):
     if not TG_TOKEN or not TG_CHAT_ID: return
     try:
-        tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                payload["text"] = text[i:i+4000]
+                tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=payload, timeout=10)
+                time.sleep(1)
+        else:
+            tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception: pass
+
+# --- СТАТИСТИКА (/stats) ---
+def _format_stat_item(i, item):
+    price_str = f"{item['price_cents'] / 100:.2f} €" if item.get('price_cents') else "—"
+    title = (item.get('title') or "Без названия")[:60]
+    url = item.get('url') or ""
+    cat = item.get('category') or "—"
+    return (
+        f"  {i}. <a href='{url}'>{title}</a>\n"
+        f"     👁 {item.get('views_count', 0)} | ❤️ {item.get('favorites_count', 0)} "
+        f"| 💰 {price_str} | 📂 {cat}\n"
+    )
+
+def send_stats():
+    try:
+        total_res = supabase.table("marktplaats_listings").select("id", count="exact").limit(1).execute()
+        total = total_res.count or 0
+
+        # Топ-5 за сегодня
+        today_iso = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        try:
+            today_res = supabase.table("marktplaats_listings").select(
+                "title, url, views_count, favorites_count, price_cents, category"
+            ).gte("parsing_date", today_iso).order("views_count", desc=True).limit(5).execute()
+            today_items = today_res.data or []
+        except Exception:
+            today_items = []
+
+        # Топ-5 за всё время (всегда)
+        top_res = supabase.table("marktplaats_listings").select(
+            "title, url, views_count, favorites_count, price_cents, category"
+        ).order("views_count", desc=True).limit(5).execute()
+        top_items = top_res.data or []
+
+        msg = "📊 <b>Статистика базы данных</b>\n\n"
+        msg += f"🗄 Всего объявлений: <b>{total}</b>\n\n"
+
+        if today_items:
+            msg += "🔥 <b>Топ-5 просматриваемых за сегодня:</b>\n"
+            for i, item in enumerate(today_items, 1):
+                msg += _format_stat_item(i, item)
+            msg += "\n"
+
+        msg += "👁 <b>Топ-5 за всё время:</b>\n"
+        for i, item in enumerate(top_items, 1):
+            msg += _format_stat_item(i, item)
+
+        send_tg(msg)
+    except Exception as e:
+        send_tg(f"⚠️ Ошибка при получении статистики: {e}")
 
 # --- ПАРСИНГ ДЕТАЛЕЙ ---
 async def get_listing_details(page, item_data, retries=2):
@@ -99,13 +171,11 @@ async def get_listing_details(page, item_data, retries=2):
             await page.goto(url, wait_until="networkidle", timeout=20000)
             try: await page.wait_for_selector("h1", timeout=5000)
             except: return None
-
             await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
 
             if "Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text:
                 return None
-
             if "Website" in page_text or "Bezoek website" in page_text:
                 return None 
 
@@ -122,7 +192,6 @@ async def get_listing_details(page, item_data, retries=2):
                 title_el = page.locator("h1").first
                 if await title_el.count() > 0: title = (await title_el.inner_text()).strip()
             except: pass
-
             if title == "Без названия" or not title: return None
 
             posted_date = ""
@@ -174,7 +243,6 @@ async def get_links_from_page(context, url):
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         await page.wait_for_selector("a[href*='/v/'], a[href*='/a/']", timeout=10000)
         await page.wait_for_timeout(2000)
-        
         links = await page.locator("a[href*='/v/'], a[href*='/a/']").all()
         res = []
         for l in links:
@@ -188,52 +256,38 @@ async def get_links_from_page(context, url):
     finally:
         await page.close()
 
-# --- ПОСТРОЕНИЕ URL С ПАГИНАЦИЕЙ ---
+# --- ПОСТРОЕНИЕ URL ---
 def build_page_url(base_url, page_num):
-    if page_num == 1:
-        return base_url
-        
+    if page_num == 1: return base_url
     if '#' in base_url:
         path, fragment = base_url.split('#', 1)
         fragment = '#' + fragment
     else:
         path, fragment = base_url, ''
-        
-    path = re.sub(r'/p/\d+/?', '', path)
-    path = path.rstrip('/')
-    
-    if '/l/' in path:
-        return f"{path}/p/{page_num}/{fragment}"
-    elif '/q/' in path:
-        return f"{path}/p/{page_num}/{fragment}"
-    
+    path = re.sub(r'/p/\d+/?', '', path).rstrip('/')
+    if '/l/' in path: return f"{path}/p/{page_num}/{fragment}"
+    elif '/q/' in path: return f"{path}/p/{page_num}/{fragment}"
     return base_url
 
-# --- ЗАПИСЬ В БАЗУ (UPSERT БЕЗ ДУБЛЕЙ) ---
+# --- ЗАПИСЬ В БАЗУ (UPSERT) ---
 def process_and_save(parsed_items):
     if not parsed_items: return []
-    
     chunk_size = 50
     new_listings_found = []
-    
     for i in range(0, len(parsed_items), chunk_size):
         chunk = parsed_items[i:i + chunk_size]
         ids_to_check = [item["id"] for item in chunk]
-        
         existing_data = {}
         try:
             response = supabase.table("marktplaats_listings").select("id, price_cents").in_("id", ids_to_check).execute()
             existing_data = {row["id"]: row["price_cents"] for row in response.data}
         except Exception as e: 
-            logger.error(f"Ошибка чтения из Supabase: {e}")
             continue
 
         snapshots_to_insert = []
-        
         for item in chunk:
             item_id = item["id"]
             current_price = item["price_cents"]
-            
             if item_id in existing_data:
                 if existing_data[item_id] != current_price:
                     snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
@@ -246,22 +300,16 @@ def process_and_save(parsed_items):
             if snapshots_to_insert:
                 supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
         except Exception as e:
-            logger.error(f"Ошибка записи в Supabase: {e}")
-            
+            pass
     return new_listings_found
 
 # --- ГЛАВНЫЙ ПРОЦЕСС ---
 async def run_playwright(links_list, pages_count):
     all_new_listings = []
     batch_size = 5
-    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={'width': 1920, 'height': 1080}
-        )
-        
+        context = await browser.new_context(user_agent=random.choice(USER_AGENTS), viewport={'width': 1920, 'height': 1080})
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
@@ -270,13 +318,10 @@ async def run_playwright(links_list, pages_count):
         """)
 
         for idx, base_url in enumerate(links_list, 1):
-            logger.info(f"--- Обработка ссылки {idx}/{len(links_list)}: {base_url} ---")
-            
             cat_slug = "Other"
             if "/l/" in base_url:
                 match = re.search(r'/l/([^/]+)/', base_url)
                 if match: cat_slug = match.group(1)
-                
             send_tg(f"📂 Начинаю: <b>{cat_slug}</b> ({idx}/{len(links_list)})")
 
             all_links = []
@@ -287,84 +332,108 @@ async def run_playwright(links_list, pages_count):
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             
             all_links = list(set(all_links))
-            if not all_links:
-                continue
+            if not all_links: continue
                 
             for i in range(0, len(all_links), batch_size):
                 batch_urls = all_links[i:i + batch_size]
                 batch_data = [{"url": u, "category": cat_slug} for u in batch_urls]
-                
                 batch_results = await process_batch(context, batch_data)
-                
                 if batch_results:
                     saved = process_and_save(batch_results)
                     all_new_listings.extend(saved)
-                
                 await asyncio.sleep(random.uniform(1.0, 2.0))
-
         await browser.close()
     return all_new_listings
 
-def main():
-    logger.info("Запуск...")
-    if not TG_TOKEN or not TG_CHAT_ID: return
+def get_total_db_count():
+    try:
+        res = supabase.table("marktplaats_listings").select("id", count="exact").limit(1).execute()
+        return res.count if res.count is not None else 0
+    except: return 0
 
+def main():
+    if not TG_TOKEN or not TG_CHAT_ID: return
     updates = get_updates(offset=0)
     last_update_id = updates[-1]["update_id"] if updates else 0
 
-    send_tg("1️⃣ Скинь ссылки (каждую с новой строки) ИЛИ ничего не пиши 5 минут, и я запущу дефолтный список из 32 категорий.")
+    # Если последнее входящее сообщение между запусками — /stats, отвечаем и не парсим
+    if updates:
+        last_up = updates[-1]
+        if "message" in last_up and "text" in last_up["message"]:
+            if last_up["message"]["text"].strip().lower().startswith("/stats"):
+                send_stats()
+                return
+
+    buttons = {
+        "inline_keyboard": [
+            [{"text": "🚀 1 страница", "callback_data": "pages_1"},
+             {"text": "🔥 3 страницы", "callback_data": "pages_3"}],
+            [{"text": "📦 5 страниц", "callback_data": "pages_5"}],
+            [{"text": "📊 Статистика", "callback_data": "cmd_stats"}],
+        ]
+    }
+    send_tg("1️⃣ Скинь ссылки (каждую с новой строки) ИЛИ выбери количество страниц кнопками ниже (для дефолтного списка):", reply_markup=buttons)
     
-    raw_text, last_update_id = wait_for_text(last_update_id, 5) # <--- 5 МИНУТ
+    raw_text, last_update_id = wait_for_response(last_update_id, 5)
+
+    # Пользователь выбрал «Статистика» — отчёт отправлен, парсер не запускаем
+    if raw_text == "__stats__":
+        return
     
     if not raw_text or not raw_text.strip():
         send_tg("⏰ Время вышло. Запускаю дефолтный список: 32 категории по 3 страницы.")
-        links_list = DEFAULT_LINKS
-        pages = DEFAULT_PAGES
+        links_list, pages = DEFAULT_LINKS, DEFAULT_PAGES
     else:
-        links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
-        
-        if not links_list:
-            send_tg("⚠️ Не найдено ссылок. Запускаю дефолтный список.")
+        if raw_text.startswith("pages_"):
+            pages = int(raw_text.split("_")[1])
             links_list = DEFAULT_LINKS
-            pages = DEFAULT_PAGES
+            send_tg(f"✅ Выбрано: {pages} стр. Запускаю дефолтный список из 32 категорий.")
         else:
-            send_tg(f"✅ Принято {len(links_list)} ссылок. Сколько страниц спарсить? (Если не ответишь за 5 мин, будет 3).")
-            pages_str, last_update_id = wait_for_text(last_update_id, 5) # <--- 5 МИНУТ
-            
-            if not pages_str:
-                send_tg("⏰ Время вышло. Ставлю 3 страницы по умолчанию.")
-                pages = DEFAULT_PAGES
+            links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
+            if not links_list:
+                links_list, pages = DEFAULT_LINKS, DEFAULT_PAGES
+                send_tg("⚠️ Не найдено ссылок. Запускаю дефолтный список.")
             else:
-                try: pages = int(pages_str.strip())
-                except ValueError: 
+                send_tg(f"✅ Принято {len(links_list)} ссылок. Сколько страниц спарсить? (Если не ответишь за 5 мин, будет 3).")
+                pages_str, last_update_id = wait_for_response(last_update_id, 5)
+
+                if pages_str == "__stats__":
+                    return
+                if not pages_str:
                     pages = DEFAULT_PAGES
-                    send_tg("⚠️ Не распознал число. Ставлю 3 страницы по умолчанию.")
+                    send_tg("⏰ Время вышло. Ставлю 3 страницы по умолчанию.")
+                else:
+                    try: pages = int(pages_str.strip())
+                    except ValueError: 
+                        pages = DEFAULT_PAGES
+                        send_tg("⚠️ Не распознал число. Ставлю 3 страницы по умолчанию.")
 
-    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок. Дубликаты будут обновлены.")
-
+    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок.")
     try:
         new_items = asyncio.run(run_playwright(links_list, pages))
-        
         if new_items:
-            new_items.sort(key=lambda x: x.get("views_count", 0) + (x.get("favorites_count", 0) * 20), reverse=True)
-            top_25 = new_items[:25]
-            
-            msg = "🏆 <b>ТОП-25 НОВЫХ ОБЪЯВЛЕНИЙ (за этот запуск)</b>\n\n"
-            for idx, item in enumerate(top_25, 1):
-                price_str = f"{item['price_cents'] / 100:.2f} €" if item['price_cents'] else "См. описание"
-                msg += f"{idx}. <b>{item['title']}</b>\n"
-                msg += f"👁 {item['views_count']} | ❤️ {item['favorites_count']} | 💰 {price_str}\n"
-                msg += f"🔗 <a href='{item['url']}'>Открыть</a>\n\n"
+            grouped = defaultdict(list)
+            for item in new_items:
+                grouped[item['category']].append(item)
                 
-            send_tg(msg)
-            
-            if len(new_items) > 25:
-                send_tg(f"📊 Всего найдено новых: {len(new_items)}. В базе сохранены все, в топе показаны 25 лучших.")
+            report = "🏆 <b>ТОП-5 НОВЫХ ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ</b>\n\n"
+            for cat, items in grouped.items():
+                items.sort(key=lambda x: x.get("views_count", 0) + (x.get("favorites_count", 0) * 20), reverse=True)
+                top_5 = items[:5]
+                report += f"📂 <b>{cat}</b> (найдено {len(items)})\n"
+                for idx, item in enumerate(top_5, 1):
+                    price_str = f"{item['price_cents'] / 100:.2f} €" if item['price_cents'] else "См. описание"
+                    report += f"  {idx}. <a href='{item['url']}'>{item['title'][:50]}</a>\n"
+                    report += f"     👁 {item['views_count']} | ❤️ {item['favorites_count']} | 💰 {price_str}\n"
+                report += "\n"
+                
+            total_db = get_total_db_count()
+            report += f"📊 <b>Всего новых за запуск:</b> {len(new_items)}\n"
+            report += f"🗄 <b>Всего в базе:</b> {total_db} объявлений."
+            send_tg(report)
         else:
-            send_tg("🏁 Парсинг завершен! Новых объявлений не найдено (всё уже было в базе).")
-            
+            send_tg("🏁 Парсинг завершен! Новых объявлений не найдено.")
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
         send_tg(f"💥 Ошибка: {e}")
 
 if __name__ == "__main__":
