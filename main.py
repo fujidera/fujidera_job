@@ -27,7 +27,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
 ]
 
-# --- СПИСОК ССЫЛОК ПО УМОЛЧАНИЮ (ЕСЛИ БОТ МОЛЧИТ 15 МИНУТ) ---
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -210,12 +209,12 @@ def build_page_url(base_url, page_num):
     
     return base_url
 
-# --- ЗАПИСЬ В БАЗУ (С ПРОВЕРКОЙ НА ДУБЛИ) ---
+# --- ЗАПИСЬ В БАЗУ (UPSERT БЕЗ ДУБЛЕЙ) ---
 def process_and_save(parsed_items):
-    if not parsed_items: return 0
+    if not parsed_items: return []
     
     chunk_size = 50
-    new_count = 0
+    new_listings_found = []
     
     for i in range(0, len(parsed_items), chunk_size):
         chunk = parsed_items[i:i + chunk_size]
@@ -226,41 +225,34 @@ def process_and_save(parsed_items):
             response = supabase.table("marktplaats_listings").select("id, price_cents").in_("id", ids_to_check).execute()
             existing_data = {row["id"]: row["price_cents"] for row in response.data}
         except Exception as e: 
+            logger.error(f"Ошибка чтения из Supabase: {e}")
             continue
 
-        new_listings, updated_listings = [], []
+        snapshots_to_insert = []
         
         for item in chunk:
             item_id = item["id"]
             current_price = item["price_cents"]
             
-            if item_id not in existing_data:
-                # Этого объявления нет в базе — добавляем
-                new_listings.append(item)
+            if item_id in existing_data:
+                if existing_data[item_id] != current_price:
+                    snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
             else:
-                # Объявление уже есть — просто обновляем данные, не создаем дубль
-                updated_listings.append(item)
+                new_listings_found.append(item)
+                snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
 
         try:
-            if new_listings:
-                supabase.table("marktplaats_listings").insert(new_listings).execute()
-                new_count += len(new_listings)
-            if updated_listings:
-                for item in updated_listings:
-                    supabase.table("marktplaats_listings").update({
-                        "last_seen": datetime.now(timezone.utc).isoformat(),
-                        "price_cents": item["price_cents"],
-                        "views_count": item["views_count"],
-                        "favorites_count": item["favorites_count"]
-                    }).eq("id", item["id"]).execute()
+            supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
+            if snapshots_to_insert:
+                supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
         except Exception as e:
             logger.error(f"Ошибка записи в Supabase: {e}")
             
-    return new_count
+    return new_listings_found
 
 # --- ГЛАВНЫЙ ПРОЦЕСС ---
 async def run_playwright(links_list, pages_count):
-    total_saved = 0
+    all_new_listings = []
     batch_size = 5
     
     async with async_playwright() as p:
@@ -294,13 +286,10 @@ async def run_playwright(links_list, pages_count):
                 all_links.extend(links)
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             
-            # Убираем дубликаты ссылок внутри одной категории
             all_links = list(set(all_links))
             if not all_links:
                 continue
                 
-            new_in_category = 0
-            
             for i in range(0, len(all_links), batch_size):
                 batch_urls = all_links[i:i + batch_size]
                 batch_data = [{"url": u, "category": cat_slug} for u in batch_urls]
@@ -309,18 +298,12 @@ async def run_playwright(links_list, pages_count):
                 
                 if batch_results:
                     saved = process_and_save(batch_results)
-                    total_saved += saved
-                    new_in_category += saved
+                    all_new_listings.extend(saved)
                 
                 await asyncio.sleep(random.uniform(1.0, 2.0))
 
-            if new_in_category > 0:
-                send_tg(f"✅ <b>{cat_slug}</b> готова!\nДобавлено новых: <b>{new_in_category}</b> (из {len(all_links)} проверенных).")
-            else:
-                send_tg(f"✅ <b>{cat_slug}</b> готова. Новых товаров нет (все уже есть в базе).")
-
         await browser.close()
-    return total_saved
+    return all_new_listings
 
 def main():
     logger.info("Запуск...")
@@ -333,17 +316,15 @@ def main():
     
     raw_text, last_update_id = wait_for_text(last_update_id, 15)
     
-    # ЛОГИКА ЕСЛИ ПОЛЬЗОВАТЕЛЬ НЕ ОТВЕТИЛ ИЛИ СКИНУЛ ПУСТОТУ
     if not raw_text or not raw_text.strip():
-        send_tg("⏰ Время вышло (или пустое сообщение). Запускаю дефолтный список: 32 категории по 3 страницы.")
+        send_tg("⏰ Время вышло. Запускаю дефолтный список: 32 категории по 3 страницы.")
         links_list = DEFAULT_LINKS
         pages = DEFAULT_PAGES
     else:
-        # ЕСЛИ ОТВЕТИЛ
         links_list = [line.strip() for line in raw_text.splitlines() if line.strip().startswith("http")]
         
         if not links_list:
-            send_tg("⚠️ Не найдено ссылок. Запускаю дефолтный список: 32 категории по 3 страницы.")
+            send_tg("⚠️ Не найдено ссылок. Запускаю дефолтный список.")
             links_list = DEFAULT_LINKS
             pages = DEFAULT_PAGES
         else:
@@ -359,14 +340,29 @@ def main():
                     pages = DEFAULT_PAGES
                     send_tg("⚠️ Не распознал число. Ставлю 3 страницы по умолчанию.")
 
-    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок. Дубликаты будут проигнорированы.")
+    send_tg(f"🚀 Поехали! Парсим по {pages} страниц с каждой из {len(links_list)} ссылок. Дубликаты будут обновлены.")
 
     try:
-        total_saved = asyncio.run(run_playwright(links_list, pages))
-        if total_saved > 0:
-            send_tg(f"🏁 Парсинг завершен! Успешно добавлено {total_saved} новых объявлений.")
+        new_items = asyncio.run(run_playwright(links_list, pages))
+        
+        if new_items:
+            new_items.sort(key=lambda x: x.get("views_count", 0) + (x.get("favorites_count", 0) * 20), reverse=True)
+            top_25 = new_items[:25]
+            
+            msg = "🏆 <b>ТОП-25 НОВЫХ ОБЪЯВЛЕНИЙ (за этот запуск)</b>\n\n"
+            for idx, item in enumerate(top_25, 1):
+                price_str = f"{item['price_cents'] / 100:.2f} €" if item['price_cents'] else "См. описание"
+                msg += f"{idx}. <b>{item['title']}</b>\n"
+                msg += f"👁 {item['views_count']} | ❤️ {item['favorites_count']} | 💰 {price_str}\n"
+                msg += f"🔗 <a href='{item['url']}'>Открыть</a>\n\n"
+                
+            send_tg(msg)
+            
+            if len(new_items) > 25:
+                send_tg(f"📊 Всего найдено новых: {len(new_items)}. В базе сохранены все, в топе показаны 25 лучших.")
         else:
             send_tg("🏁 Парсинг завершен! Новых объявлений не найдено (всё уже было в базе).")
+            
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         send_tg(f"💥 Ошибка: {e}")
