@@ -4,9 +4,9 @@ import asyncio
 import time
 from datetime import datetime, timezone, timedelta
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
 from supabase import create_client
 from curl_cffi import requests as curl_requests
@@ -30,6 +30,14 @@ MAX_LIMIT = 30
 
 _list_states: dict[str, dict] = {}
 
+# ---------- Клавиатура ----------
+def get_main_keyboard():
+    keyboard = [
+        [KeyboardButton("📊 Статистика"), KeyboardButton("📋 Список")],
+        [KeyboardButton("👁 Топ-5"), KeyboardButton("🚀 Парсинг (3 стр)")],
+        [KeyboardButton("⚙️ Фильтры"), KeyboardButton("❓ Помощь")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 # ---------- Работа с offset в БД ----------
 def get_offset_from_db() -> int:
@@ -41,18 +49,15 @@ def get_offset_from_db() -> int:
         logger.error(f"DB error getting offset: {e}")
     return 0
 
-
 def save_offset_to_db(offset: int):
     try:
         supabase.table("bot_state").upsert({"id": 1, "last_update_id": offset}).execute()
     except Exception as e:
         logger.error(f"DB error saving offset: {e}")
 
-
 # ---------- auth ----------
 def _authorized(update: Update) -> bool:
     return update.effective_chat is not None and update.effective_chat.id == TG_CHAT_ID
-
 
 async def _reject(update: Update):
     if update.effective_message:
@@ -60,7 +65,6 @@ async def _reject(update: Update):
             await update.effective_message.reply_text("⛔ Нет доступа.")
         except Exception:
             pass
-
 
 # ---------- фильтры ----------
 ALLOWED_KEYS = {
@@ -75,7 +79,6 @@ SORT_MAP = {
     "favs": ("favorites_count", True),
 }
 
-
 def parse_filters(text: str) -> dict:
     result = {}
     for tok in text.split():
@@ -87,10 +90,8 @@ def parse_filters(text: str) -> dict:
             result[k] = v
     return result
 
-
 def filters_to_string(f: dict) -> str:
     return " ".join(f"{k}:{v}" for k, v in f.items()) or "—"
-
 
 def _apply_filters(q, f: dict):
     if "cat" in f:
@@ -120,7 +121,6 @@ def _apply_filters(q, f: dict):
     col, desc = SORT_MAP.get(f.get("sort", "views"), ("views_count", True))
     return q.order(col, desc=desc)
 
-
 # ---------- форматирование ----------
 def format_item(i: int, item: dict) -> str:
     price = f"{item['price_cents']/100:.0f}€" if item.get("price_cents") else "—"
@@ -131,7 +131,6 @@ def format_item(i: int, item: dict) -> str:
         f"💰{price} 📂{item.get('category','—')}\n"
     )
 
-
 def _save_state(state: dict) -> str:
     key = os.urandom(3).hex()
     _list_states[key] = state
@@ -139,7 +138,6 @@ def _save_state(state: dict) -> str:
         for k in list(_list_states.keys())[:100]:
             _list_states.pop(k, None)
     return key
-
 
 async def _send_list(reply_func, filters: dict, offset: int, state_key: str | None = None):
     limit = min(int(filters.get("limit", PAGE_SIZE)), MAX_LIMIT)
@@ -196,35 +194,17 @@ async def _send_list(reply_func, filters: dict, offset: int, state_key: str | No
         logger.exception("send_list error")
         await reply_func(f"⚠️ Ошибка: {e}")
 
-
 # ---------- команды ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return await _reject(update)
     text = (
         "👋 <b>Управление парсером Marktplaats</b>\n\n"
-        "📊 <b>База:</b>\n"
-        "/stats — общая статистика\n"
-        "/list [фильтры] — показать объявления\n"
-        "/top [N] [категория] — топ по просмотрам\n\n"
-        "🚀 <b>Парсинг:</b>\n"
-        "/run — запустить с дефолтами (32 кат. × 3 стр.)\n"
-        "/run pages:2 — 2 страницы с дефолтами\n"
-        "/run links:URL1,URL2 pages:3 — свои ссылки\n\n"
-        "🔍 <b>Фильтры:</b>\n"
-        "<code>cat:fietsen</code> — категория\n"
-        "<code>q:iphone</code> — поиск в заголовке\n"
-        "<code>min_price:100 max_price:500</code> — €\n"
-        "<code>min_views:50 max_views:1000</code> — просмотры\n"
-        "<code>min_favs:5</code> — избранное\n"
-        "<code>days:1</code> — за N дней\n"
-        "<code>sort:views|price|date|favs</code>\n"
-        "<code>limit:10</code> — max 30\n\n"
-        "Пример:\n"
-        "<code>/list cat:auto-s min_price:5000 sort:price limit:10</code>"
+        "Используйте кнопки внизу экрана для быстрого доступа.\n"
+        "Для сложных фильтров используйте команды:\n"
+        "<code>/list cat:auto-s min_price:5000 limit:10</code>"
     )
-    await update.message.reply_text(text, parse_mode="HTML")
-
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -256,13 +236,11 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
-
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return await _reject(update)
     filters = parse_filters(" ".join(context.args or []))
     await _send_list(update.message.reply_text, filters, 0)
-
 
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -279,7 +257,6 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cat:
         filters["cat"] = cat
     await _send_list(update.message.reply_text, filters, 0)
-
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -319,6 +296,44 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
+# ---------- Обработка кнопок клавиатуры ----------
+async def handle_text_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        return await _reject(update)
+    
+    text = update.message.text
+
+    if text == "📊 Статистика":
+        await cmd_stats(update, context)
+    elif text == "📋 Список":
+        await cmd_list(update, context)
+    elif text == "👁 Топ-5":
+        await cmd_top(update, context)
+    elif text == "🚀 Парсинг (3 стр)":
+        context.args = ["pages:3"]
+        await cmd_run(update, context)
+    elif text == "⚙️ Фильтры":
+        help_text = (
+            "⚙️ <b>Как фильтровать объявления</b>\n\n"
+            "Отправьте команду <code>/list</code> и добавьте к ней параметры:\n\n"
+            "📁 <b>Категория:</b> <code>cat:fietsen</code>\n"
+            "🔍 <b>Поиск по названию:</b> <code>q:iphone</code>\n"
+            "💰 <b>Цена (в €):</b> <code>min_price:100 max_price:500</code>\n"
+            "👁 <b>Просмотры:</b> <code>min_views:50</code>\n"
+            "❤️ <b>Избранное:</b> <code>min_favs:5</code>\n"
+            "📅 <b>За последние N дней:</b> <code>days:1</code>\n"
+            "🔄 <b>Сортировка:</b> <code>sort:views|price|date|favs</code>\n"
+            "📄 <b>Кол-во:</b> <code>limit:10</code>\n\n"
+            "📝 <b>Пример:</b>\n"
+            "<code>/list cat:auto-s min_price:5000 sort:price limit:10</code>"
+        )
+        await update.message.reply_text(help_text, parse_mode="HTML")
+    elif text == "❓ Помощь":
+        await cmd_start(update, context)
+    else:
+        # Если написали просто текст, ищем это в названии
+        filters = {"q": text}
+        await _send_list(update.message.reply_text, filters, 0)
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -344,7 +359,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("callback error")
         await q.edit_message_text(f"⚠️ {e}")
 
-
 # ---------- Главный цикл ----------
 async def run_bot_limited_time():
     app = Application.builder().token(TG_TOKEN).build()
@@ -354,6 +368,10 @@ async def run_bot_limited_time():
     app.add_handler(CommandHandler(["list", "find"], cmd_list))
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("run", cmd_run))
+    
+    # Обработчик текста (для кнопок и быстрого поиска)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_buttons))
+    
     app.add_handler(CallbackQueryHandler(on_callback))
 
     await app.initialize()
@@ -370,13 +388,11 @@ async def run_bot_limited_time():
             updates = await app.bot.get_updates(offset=offset + 1, timeout=30)
 
             for u in updates:
-                # Сначала обработка (если упадём — повторим при рестарте)
                 try:
                     await app.process_update(u)
                 except Exception as e:
                     logger.error(f"Ошибка обработки update {u.update_id}: {e}")
 
-                # Потом сохранение offset
                 offset = u.update_id
                 save_offset_to_db(offset)
 
@@ -388,10 +404,8 @@ async def run_bot_limited_time():
     await app.stop()
     await app.shutdown()
 
-
 def main():
     asyncio.run(run_bot_limited_time())
-
 
 if __name__ == "__main__":
     main()
