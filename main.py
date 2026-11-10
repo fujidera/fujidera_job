@@ -28,7 +28,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
 ]
 
-# Список категорий (27 шт., без машин, услуг и недвижимости)
+# 27 категорий
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -363,7 +363,6 @@ def main():
 
             report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ (за текущий запуск)</b>\n\n"
             for cat, items in grouped.items():
-                # Строгая сортировка по просмотрам
                 items.sort(key=lambda x: x.get("views_count", 0), reverse=True)
                 top_5 = items[:5]
                 report += f"📂 <b>{cat}</b> (спарсено {len(items)})\n"
@@ -383,4 +382,8 @@ def main():
         send_tg(f"💥 Ошибка: {e}")
 
 if __name__ == "__main__":
-    main()
+    print("=== ПАРСЕР ЗАПУЩЕН ===")
+    try:
+        main()
+    except Exception as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
