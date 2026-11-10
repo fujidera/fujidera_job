@@ -304,6 +304,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             headers={
                 "Authorization": f"Bearer {GH_TOKEN}",
                 "Accept": "application/vnd.github+json",
+                "User-Agent": "MP-Bot-Trigger"
             },
             json=payload, timeout=15,
         )
