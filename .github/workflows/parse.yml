@@ -2,7 +2,8 @@ name: Parse Marktplaats
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    # Запуск каждые 3 часа (00:00, 03:00, 06:00 и т.д.)
+    - cron: '0 */3 * * *'
   workflow_dispatch:
     inputs:
       pages:
