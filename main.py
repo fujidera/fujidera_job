@@ -64,6 +64,42 @@ DEFAULT_LINKS = [
 ]
 DEFAULT_PAGES = 3
 
+# Словарь для перевода голландских месяцев
+NL_MONTHS = {
+    'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'nov': 11, 'dec': 12
+}
+
+def parse_dutch_date(date_str):
+    """Превращает '1 aug. \'26, 07:36' в ISO формат"""
+    if not date_str:
+        return None
+    
+    # Ищем паттерн: число, месяц, год (с апострофом или без), время
+    # Пример: "1 aug. '26, 07:36" или "1 nov. 25, 17:09"
+    match = re.search(r'(\d{1,2})\s+([a-zA-Z]{3})\.?\s+\'?(\d{2,4})[,\s]+(\d{1,2}):(\d{2})', date_str)
+    if not match:
+        return None
+        
+    day = int(match.group(1))
+    month_str = match.group(2).lower()
+    year_str = match.group(3)
+    hour = int(match.group(4))
+    minute = int(match.group(5))
+    
+    month = NL_MONTHS.get(month_str)
+    if not month:
+        return None
+        
+    year = int(year_str)
+    if year < 100:
+        year += 2000  # '26 -> 2026
+        
+    try:
+        dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return None
 
 def send_tg(text, reply_markup=None):
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -130,15 +166,23 @@ async def get_listing_details(page, item_data, retries=2):
             if title == "Без названия" or not title:
                 return None
 
-            posted_date = ""
+            # Ищем дату публикации
+            raw_date = ""
             try:
+                # Пытаемся взять title у элемента статистики
                 date_title_el = page.locator(".Report-module-stat[title]").first
                 if await date_title_el.count() > 0:
-                    title_date = await date_title_el.get_attribute("title")
-                    if title_date:
-                        posted_date = title_date
+                    raw_date = await date_title_el.get_attribute("title")
+                else:
+                    # Если нет, ищем текст вида "Sinds 1 aug '26"
+                    date_match = re.search(r'Sinds\s+([0-9]{1,2}\s+[a-zA-Z]{3}\.?\s+\'?[0-9]{2,4})', page_text)
+                    if date_match:
+                        raw_date = date_match.group(1)
             except Exception:
                 pass
+                
+            # Конвертируем в ISO формат (TIMESTAMPTZ)
+            posted_date = parse_dutch_date(raw_date)
 
             price_cents = 0
             try:
@@ -256,6 +300,7 @@ def process_and_save(parsed_items):
                 )
 
         try:
+            # upsert автоматически обработает ISO-строку даты в тип TIMESTAMPTZ
             supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
             if snapshots_to_insert:
                 supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
@@ -265,7 +310,8 @@ def process_and_save(parsed_items):
 
 
 async def run_playwright(links_list, pages_count):
-    all_new_listings = []
+    all_parsed_items = [] 
+    all_new_listings = [] 
     batch_size = 5
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -306,11 +352,12 @@ async def run_playwright(links_list, pages_count):
                 batch_data = [{"url": u, "category": cat_slug} for u in batch_urls]
                 batch_results = await process_batch(context, batch_data)
                 if batch_results:
-                    saved = process_and_save(batch_results)
-                    all_new_listings.extend(saved)
+                    new_saved = process_and_save(batch_results)
+                    all_new_listings.extend(new_saved)
+                    all_parsed_items.extend(batch_results)
                 await asyncio.sleep(random.uniform(1.0, 2.0))
         await browser.close()
-    return all_new_listings
+    return all_parsed_items, all_new_listings
 
 
 def get_total_db_count():
@@ -337,20 +384,21 @@ def main():
 
     send_tg(f"🚀 Запуск парсера: {len(links_list)} ссылок × {pages} стр.")
     try:
-        new_items = asyncio.run(run_playwright(links_list, pages))
-        if new_items:
+        parsed_items, new_items = asyncio.run(run_playwright(links_list, pages))
+        
+        if parsed_items:
             grouped = defaultdict(list)
-            for item in new_items:
+            for item in parsed_items:
                 grouped[item['category']].append(item)
 
-            report = "🏆 <b>ТОП-5 НОВЫХ ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ</b>\n\n"
+            report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ (за текущий запуск)</b>\n\n"
             for cat, items in grouped.items():
                 items.sort(
                     key=lambda x: x.get("views_count", 0) + (x.get("favorites_count", 0) * 20),
                     reverse=True,
                 )
                 top_5 = items[:5]
-                report += f"📂 <b>{cat}</b> (найдено {len(items)})\n"
+                report += f"📂 <b>{cat}</b> (спарсено {len(items)})\n"
                 for idx, item in enumerate(top_5, 1):
                     price_str = (f"{item['price_cents'] / 100:.2f} €"
                                  if item['price_cents'] else "См. описание")
@@ -360,11 +408,11 @@ def main():
                 report += "\n"
 
             total_db = get_total_db_count()
-            report += f"📊 <b>Всего новых за запуск:</b> {len(new_items)}\n"
+            report += f"🆕 <b>Из них абсолютно новых:</b> {len(new_items)}\n"
             report += f"🗄 <b>Всего в базе:</b> {total_db} объявлений."
             send_tg(report)
         else:
-            send_tg("🏁 Парсинг завершен! Новых объявлений не найдено.")
+            send_tg("🏁 Парсинг завершен! Не удалось собрать данные.")
     except Exception as e:
         send_tg(f"💥 Ошибка: {e}")
 
