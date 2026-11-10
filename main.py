@@ -24,8 +24,7 @@ tg_session = curl_requests.Session()
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
 # 27 категорий
@@ -60,50 +59,30 @@ DEFAULT_LINKS = [
 ]
 DEFAULT_PAGES = 3
 
-NL_MONTHS = {
-    'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6,
-    'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'nov': 11, 'dec': 12
-}
+NL_MONTHS = {'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'nov': 11, 'dec': 12}
 
 def parse_dutch_date(date_str):
-    if not date_str or not isinstance(date_str, str) or date_str.strip().upper() == "EMPTY":
-        return None
-        
+    if not date_str or not isinstance(date_str, str) or date_str.strip().upper() == "EMPTY": return None
     date_str = date_str.strip().replace('\xa0', ' ').lower()
     now = datetime.now(timezone.utc)
-    
-    if "vandaag" in date_str:
-        return now.strftime('%Y-%m-%d')
-    if "gisteren" in date_str:
-        return (now - timedelta(days=1)).strftime('%Y-%m-%d')
-    if "eergisteren" in date_str:
-        return (now - timedelta(days=2)).strftime('%Y-%m-%d')
+    if "vandaag" in date_str: return now.strftime('%Y-%m-%d')
+    if "gisteren" in date_str: return (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    if "eergisteren" in date_str: return (now - timedelta(days=2)).strftime('%Y-%m-%d')
 
     match = re.search(r'(\d{1,2})\s*([a-zA-Z]{3,4})\.?\s*\'?(\d{2,4})', date_str)
-    if not match:
-        return None
-        
+    if not match: return None
     day = int(match.group(1))
     month_str = match.group(2)[:3].lower()
     year_str = match.group(3)
-    
     month = NL_MONTHS.get(month_str)
-    if not month:
-        return None
-        
+    if not month: return None
     year = int(year_str)
-    if year < 100:
-        year += 2000
-        
-    try:
-        dt = datetime(year, month, day, tzinfo=timezone.utc)
-        return dt.strftime('%Y-%m-%d')
-    except ValueError:
-        return None
+    if year < 100: year += 2000
+    try: return datetime(year, month, day, tzinfo=timezone.utc).strftime('%Y-%m-%d')
+    except ValueError: return None
 
 def send_tg(text):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        return
+    if not TG_TOKEN or not TG_CHAT_ID: return
     try:
         payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
         if len(text) > 4000:
@@ -113,60 +92,44 @@ def send_tg(text):
                 time.sleep(1)
         else:
             tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=payload, timeout=10)
-    except Exception:
-        pass
+    except Exception: pass
 
 async def get_listing_details(page, item_data, retries=2):
     url = item_data["url"]
     cat_name = item_data["category"]
-
     for attempt in range(retries):
         try:
             await page.goto(url, wait_until="networkidle", timeout=20000)
-            try:
-                await page.wait_for_selector("h1", timeout=5000)
-            except Exception:
-                return None
+            try: await page.wait_for_selector("h1", timeout=5000)
+            except Exception: return None
             await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
-
-            if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text):
-                return None
-            if "Website" in page_text or "Bezoek website" in page_text:
-                return None
+            if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text): return None
+            if "Website" in page_text or "Bezoek website" in page_text: return None
 
             views = 0
             v_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
-            if v_match:
-                views = int(v_match.group(1).replace('.', ''))
+            if v_match: views = int(v_match.group(1).replace('.', ''))
 
             favorites = 0
             f_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bewaard', page_text, re.IGNORECASE)
-            if f_match:
-                favorites = int(f_match.group(1).replace('.', ''))
+            if f_match: favorites = int(f_match.group(1).replace('.', ''))
 
             title = "Без названия"
             try:
                 title_el = page.locator("h1").first
-                if await title_el.count() > 0:
-                    title = (await title_el.inner_text()).strip()
-            except Exception:
-                pass
-            if title == "Без названия" or not title:
-                return None
+                if await title_el.count() > 0: title = (await title_el.inner_text()).strip()
+            except Exception: pass
+            if title == "Без названия" or not title: return None
 
             raw_date = ""
             date_match = re.search(r'Sinds\s+(\d{1,2}\s+[a-zA-Z]{3,4}\.?\s*\'?\d{2,4}(?:[,\s]+\d{1,2}:\d{2})?)', page_text, re.IGNORECASE)
-            if date_match:
-                raw_date = date_match.group(1)
+            if date_match: raw_date = date_match.group(1)
             else:
                 try:
                     date_title_el = page.locator(".Report-module-stat[title]").first
-                    if await date_title_el.count() > 0:
-                        raw_date = await date_title_el.get_attribute("title")
-                except Exception:
-                    pass
-                    
+                    if await date_title_el.count() > 0: raw_date = await date_title_el.get_attribute("title")
+                except Exception: pass
             posted_date = parse_dutch_date(raw_date)
 
             price_cents = 0
@@ -176,28 +139,56 @@ async def get_listing_details(page, item_data, retries=2):
                     raw_price = (await price_el.inner_text()).strip()
                     p_text = raw_price.replace('€', '').replace('.', '').replace(',', '.').strip()
                     m = re.search(r'(\d+(?:\.\d+)?)', p_text)
-                    if m:
-                        price_cents = int(float(m.group(1)) * 100)
-            except Exception:
-                pass
+                    if m: price_cents = int(float(m.group(1)) * 100)
+            except Exception: pass
+            
+            # --- ОБНОВЛЕННЫЙ СБОР ДАННЫХ ---
+            # 1. Картинка (через мета-тег og:image, он не зависит от lazy-load)
+            image_url = ""
+            try:
+                meta_img = page.locator("meta[property='og:image']").first
+                if await meta_img.count() > 0:
+                    image_url = await meta_img.get_attribute("content")
+                else:
+                    img_el = page.locator("img[src*='marktplaats.com']").first
+                    if await img_el.count() > 0: 
+                        image_url = await img_el.get_attribute("src")
+            except Exception: pass
+            if image_url and not image_url.startswith('http'):
+                image_url = ""
+
+            # 2. Описание
+            description = ""
+            try:
+                desc_el = page.locator("div[data-testid='description'], div.Description, div[class*='Description']").first
+                if await desc_el.count() > 0:
+                    description = (await desc_el.inner_text()).strip()
+            except Exception: pass
+
+            # 3. Продавец
+            seller_name = ""
+            try:
+                seller_el = page.locator("a[href*='/u/']").first
+                if await seller_el.count() > 0:
+                    seller_name = (await seller_el.inner_text()).strip()
+            except Exception: pass
+            # -------------------------------
 
             item_id = url.split('/')[-1]
-            
             item_dict = {
                 "id": item_id, "title": title,
                 "parsing_date": datetime.now(timezone.utc).isoformat(),
                 "category": cat_name, "price_cents": price_cents,
                 "views_count": views, "favorites_count": favorites,
                 "url": url, "last_seen": datetime.now(timezone.utc).isoformat(),
+                "image_url": image_url,
+                "description": description,
+                "seller_name": seller_name
             }
-            
-            if posted_date:
-                item_dict["publication_date"] = posted_date
-                
+            if posted_date: item_dict["publication_date"] = posted_date
             return item_dict
         except Exception:
-            if attempt == retries - 1:
-                return None
+            if attempt == retries - 1: return None
             await asyncio.sleep(1)
 
 async def process_batch(context, batch_data):
@@ -207,11 +198,9 @@ async def process_batch(context, batch_data):
             asyncio.gather(*[get_listing_details(tasks[i], batch_data[i]) for i in range(len(batch_data))], return_exceptions=True),
             timeout=60.0,
         )
-    except asyncio.TimeoutError:
-        results = []
+    except asyncio.TimeoutError: results = []
     finally:
-        for t in tasks:
-            await t.close()
+        for t in tasks: await t.close()
     return [r for r in results if isinstance(r, dict)]
 
 async def get_links_from_page(context, url):
@@ -228,52 +217,40 @@ async def get_links_from_page(context, url):
                 clean = ('https://www.marktplaats.nl' + href.split('?')[0] if href.startswith('/') else href.split('?')[0])
                 res.append(clean)
         return list(set(res))
-    except Exception:
-        return []
-    finally:
-        await page.close()
+    except Exception: return []
+    finally: await page.close()
 
 def build_page_url(base_url, page_num):
-    if page_num == 1:
-        return base_url
+    if page_num == 1: return base_url
     if '#' in base_url:
         path, fragment = base_url.split('#', 1)
         fragment = '#' + fragment
-    else:
-        path, fragment = base_url, ''
+    else: path, fragment = base_url, ''
     path = re.sub(r'/p/\d+/?', '', path).rstrip('/')
-    if '/l/' in path:
-        return f"{path}/p/{page_num}/{fragment}"
-    elif '/q/' in path:
-        return f"{path}/p/{page_num}/{fragment}"
+    if '/l/' in path: return f"{path}/p/{page_num}/{fragment}"
+    elif '/q/' in path: return f"{path}/p/{page_num}/{fragment}"
     return base_url
 
 def process_and_save(parsed_items):
-    if not parsed_items:
-        return []
+    if not parsed_items: return []
     chunk_size = 50
     new_listings_found = []
     for i in range(0, len(parsed_items), chunk_size):
         chunk = parsed_items[i:i + chunk_size]
         ids_to_check = [item["id"] for item in chunk]
         existing_data = {}
-        
         try:
             response = supabase.table("marktplaats_listings").select("id, price_cents, publication_date").in_("id", ids_to_check).execute()
             existing_data = {row["id"]: row for row in response.data}
-        except Exception:
-            continue
+        except Exception: continue
 
         snapshots_to_insert = []
         for item in chunk:
             item_id = item["id"]
             current_price = item["price_cents"]
-            
             if "publication_date" not in item and item_id in existing_data:
                 db_date = existing_data[item_id].get("publication_date")
-                if db_date:
-                    item["publication_date"] = db_date
-            
+                if db_date: item["publication_date"] = db_date
             if item_id in existing_data:
                 if existing_data[item_id].get("price_cents") != current_price:
                     snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
@@ -285,8 +262,7 @@ def process_and_save(parsed_items):
             supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
             if snapshots_to_insert:
                 supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
-        except Exception as e:
-            logger.error(f"Ошибка записи в базу: {e}")
+        except Exception as e: logger.error(f"Ошибка записи: {e}")
     return new_listings_found
 
 async def run_playwright(links_list, pages_count):
@@ -307,8 +283,7 @@ async def run_playwright(links_list, pages_count):
             cat_slug = "Other"
             if "/l/" in base_url:
                 match = re.search(r'/l/([^/]+)/', base_url)
-                if match:
-                    cat_slug = match.group(1)
+                if match: cat_slug = match.group(1)
             send_tg(f"📂 Начинаю: <b>{cat_slug}</b> ({idx}/{len(links_list)})")
 
             all_links = []
@@ -319,8 +294,7 @@ async def run_playwright(links_list, pages_count):
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
             all_links = list(set(all_links))
-            if not all_links:
-                continue
+            if not all_links: continue
 
             for i in range(0, len(all_links), batch_size):
                 batch_urls = all_links[i:i + batch_size]
@@ -338,8 +312,7 @@ def get_total_db_count():
     try:
         res = supabase.table("marktplaats_listings").select("id", count="exact").limit(1).execute()
         return res.count if res.count is not None else 0
-    except Exception:
-        return 0
+    except Exception: return 0
 
 def main():
     pages = int(os.environ.get("INPUT_PAGES") or DEFAULT_PAGES)
@@ -347,21 +320,17 @@ def main():
 
     if links_raw:
         links_list = [l.strip() for l in links_raw.splitlines() if l.strip().startswith("http")]
-        if not links_list:
-            links_list = DEFAULT_LINKS
-    else:
-        links_list = DEFAULT_LINKS
+        if not links_list: links_list = DEFAULT_LINKS
+    else: links_list = DEFAULT_LINKS
 
     send_tg(f"🚀 Запуск парсера: {len(links_list)} ссылок × {pages} стр.")
     try:
         parsed_items, new_items = asyncio.run(run_playwright(links_list, pages))
-        
         if parsed_items:
             grouped = defaultdict(list)
-            for item in parsed_items:
-                grouped[item['category']].append(item)
+            for item in parsed_items: grouped[item['category']].append(item)
 
-            report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ (за текущий запуск)</b>\n\n"
+            report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ</b>\n\n"
             for cat, items in grouped.items():
                 items.sort(key=lambda x: x.get("views_count", 0), reverse=True)
                 top_5 = items[:5]
@@ -373,17 +342,12 @@ def main():
                 report += "\n"
 
             total_db = get_total_db_count()
-            report += f"🆕 <b>Из них абсолютно новых:</b> {len(new_items)}\n"
+            report += f"🆕 <b>Из них новых:</b> {len(new_items)}\n"
             report += f"🗄 <b>Всего в базе:</b> {total_db} объявлений."
             send_tg(report)
-        else:
-            send_tg("🏁 Парсинг завершен! Не удалось собрать данные.")
-    except Exception as e:
-        send_tg(f"💥 Ошибка: {e}")
+        else: send_tg("🏁 Парсинг завершен! Не удалось собрать данные.")
+    except Exception as e: send_tg(f"💥 Ошибка: {e}")
 
 if __name__ == "__main__":
     print("=== ПАРСЕР ЗАПУЩЕН ===")
-    try:
-        main()
-    except Exception as e:
-        print(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+    main()
