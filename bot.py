@@ -30,6 +30,7 @@ MAX_LIMIT = 30
 
 _list_states: dict[str, dict] = {}
 
+
 # ---------- Работа с offset в БД ----------
 def get_offset_from_db() -> int:
     try:
@@ -40,15 +41,18 @@ def get_offset_from_db() -> int:
         logger.error(f"DB error getting offset: {e}")
     return 0
 
+
 def save_offset_to_db(offset: int):
     try:
         supabase.table("bot_state").upsert({"id": 1, "last_update_id": offset}).execute()
     except Exception as e:
         logger.error(f"DB error saving offset: {e}")
 
+
 # ---------- auth ----------
 def _authorized(update: Update) -> bool:
     return update.effective_chat is not None and update.effective_chat.id == TG_CHAT_ID
+
 
 async def _reject(update: Update):
     if update.effective_message:
@@ -56,6 +60,7 @@ async def _reject(update: Update):
             await update.effective_message.reply_text("⛔ Нет доступа.")
         except Exception:
             pass
+
 
 # ---------- фильтры ----------
 ALLOWED_KEYS = {
@@ -70,6 +75,7 @@ SORT_MAP = {
     "favs": ("favorites_count", True),
 }
 
+
 def parse_filters(text: str) -> dict:
     result = {}
     for tok in text.split():
@@ -81,8 +87,10 @@ def parse_filters(text: str) -> dict:
             result[k] = v
     return result
 
+
 def filters_to_string(f: dict) -> str:
     return " ".join(f"{k}:{v}" for k, v in f.items()) or "—"
+
 
 def _apply_filters(q, f: dict):
     if "cat" in f:
@@ -112,6 +120,7 @@ def _apply_filters(q, f: dict):
     col, desc = SORT_MAP.get(f.get("sort", "views"), ("views_count", True))
     return q.order(col, desc=desc)
 
+
 # ---------- форматирование ----------
 def format_item(i: int, item: dict) -> str:
     price = f"{item['price_cents']/100:.0f}€" if item.get("price_cents") else "—"
@@ -122,6 +131,7 @@ def format_item(i: int, item: dict) -> str:
         f"💰{price} 📂{item.get('category','—')}\n"
     )
 
+
 def _save_state(state: dict) -> str:
     key = os.urandom(3).hex()
     _list_states[key] = state
@@ -129,6 +139,7 @@ def _save_state(state: dict) -> str:
         for k in list(_list_states.keys())[:100]:
             _list_states.pop(k, None)
     return key
+
 
 async def _send_list(reply_func, filters: dict, offset: int, state_key: str | None = None):
     limit = min(int(filters.get("limit", PAGE_SIZE)), MAX_LIMIT)
@@ -185,6 +196,7 @@ async def _send_list(reply_func, filters: dict, offset: int, state_key: str | No
         logger.exception("send_list error")
         await reply_func(f"⚠️ Ошибка: {e}")
 
+
 # ---------- команды ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -212,6 +224,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/list cat:auto-s min_price:5000 sort:price limit:10</code>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -243,11 +256,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
+
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return await _reject(update)
     filters = parse_filters(" ".join(context.args or []))
     await _send_list(update.message.reply_text, filters, 0)
+
 
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -264,6 +279,7 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cat:
         filters["cat"] = cat
     await _send_list(update.message.reply_text, filters, 0)
+
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
@@ -302,6 +318,7 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not _authorized(update):
@@ -326,10 +343,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("callback error")
         await q.edit_message_text(f"⚠️ {e}")
 
+
 # ---------- Главный цикл ----------
 async def run_bot_limited_time():
     app = Application.builder().token(TG_TOKEN).build()
-    
+
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler(["list", "find"], cmd_list))
@@ -339,23 +357,28 @@ async def run_bot_limited_time():
 
     await app.initialize()
     await app.start()
-    
+
     offset = get_offset_from_db()
     logger.info(f"Бот запущен. Начинаем с update_id: {offset}")
 
     start_time = time.time()
-    MAX_RUNTIME = 20700  # 5 часов 45 минут (в секундах)
+    MAX_RUNTIME = 20700  # 5 часов 45 минут
 
     while time.time() - start_time < MAX_RUNTIME:
         try:
-            # Ждем обновления 30 секунд
             updates = await app.bot.get_updates(offset=offset + 1, timeout=30)
-            
+
             for u in updates:
+                # Сначала обработка (если упадём — повторим при рестарте)
+                try:
+                    await app.process_update(u)
+                except Exception as e:
+                    logger.error(f"Ошибка обработки update {u.update_id}: {e}")
+
+                # Потом сохранение offset
                 offset = u.update_id
                 save_offset_to_db(offset)
-                await app.process_update(u)
-                
+
         except Exception as e:
             logger.error(f"Ошибка polling: {e}")
             await asyncio.sleep(5)
@@ -364,8 +387,10 @@ async def run_bot_limited_time():
     await app.stop()
     await app.shutdown()
 
+
 def main():
     asyncio.run(run_bot_limited_time())
+
 
 if __name__ == "__main__":
     main()
