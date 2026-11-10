@@ -64,7 +64,7 @@ DEFAULT_LINKS = [
 ]
 DEFAULT_PAGES = 3
 
-# --- TELEGRAM (только отправка, без getUpdates) ---
+
 def send_tg(text, reply_markup=None):
     if not TG_TOKEN or not TG_CHAT_ID:
         return
@@ -88,7 +88,7 @@ def send_tg(text, reply_markup=None):
     except Exception:
         pass
 
-# --- ПАРСИНГ ДЕТАЛЕЙ ---
+
 async def get_listing_details(page, item_data, retries=2):
     url = item_data["url"]
     cat_name = item_data["category"]
@@ -167,6 +167,7 @@ async def get_listing_details(page, item_data, retries=2):
                 return None
             await asyncio.sleep(1)
 
+
 async def process_batch(context, batch_data):
     tasks = [await context.new_page() for _ in range(len(batch_data))]
     try:
@@ -184,7 +185,7 @@ async def process_batch(context, batch_data):
             await t.close()
     return [r for r in results if isinstance(r, dict)]
 
-# --- СБОР ССЫЛОК СО СТРАНИЦ ---
+
 async def get_links_from_page(context, url):
     page = await context.new_page()
     try:
@@ -205,7 +206,7 @@ async def get_links_from_page(context, url):
     finally:
         await page.close()
 
-# --- ПОСТРОЕНИЕ URL ---
+
 def build_page_url(base_url, page_num):
     if page_num == 1:
         return base_url
@@ -221,7 +222,7 @@ def build_page_url(base_url, page_num):
         return f"{path}/p/{page_num}/{fragment}"
     return base_url
 
-# --- ЗАПИСЬ В БАЗУ (UPSERT) ---
+
 def process_and_save(parsed_items):
     if not parsed_items:
         return []
@@ -262,7 +263,7 @@ def process_and_save(parsed_items):
             pass
     return new_listings_found
 
-# --- ГЛАВНЫЙ ПРОЦЕСС ---
+
 async def run_playwright(links_list, pages_count):
     all_new_listings = []
     batch_size = 5
@@ -311,6 +312,7 @@ async def run_playwright(links_list, pages_count):
         await browser.close()
     return all_new_listings
 
+
 def get_total_db_count():
     try:
         res = supabase.table("marktplaats_listings").select(
@@ -320,7 +322,7 @@ def get_total_db_count():
     except Exception:
         return 0
 
-# --- MAIN (без интерактива, читает env от workflow_dispatch) ---
+
 def main():
     pages = int(os.environ.get("INPUT_PAGES") or DEFAULT_PAGES)
     links_raw = (os.environ.get("INPUT_LINKS") or "").strip()
@@ -365,6 +367,7 @@ def main():
             send_tg("🏁 Парсинг завершен! Новых объявлений не найдено.")
     except Exception as e:
         send_tg(f"💥 Ошибка: {e}")
+
 
 if __name__ == "__main__":
     main()
