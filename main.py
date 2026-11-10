@@ -27,7 +27,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
-# 27 категорий
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -142,7 +141,6 @@ async def get_listing_details(page, item_data, retries=2):
                     if m: price_cents = int(float(m.group(1)) * 100)
             except Exception: pass
             
-            # --- ОБНОВЛЕННЫЙ СБОР ДАННЫХ ---
             # 1. Картинка (через мета-тег og:image, он не зависит от lazy-load)
             image_url = ""
             try:
@@ -172,7 +170,6 @@ async def get_listing_details(page, item_data, retries=2):
                 if await seller_el.count() > 0:
                     seller_name = (await seller_el.inner_text()).strip()
             except Exception: pass
-            # -------------------------------
 
             item_id = url.split('/')[-1]
             item_dict = {
