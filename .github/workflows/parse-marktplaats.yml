@@ -2,47 +2,64 @@ name: Parse Marktplaats
 
 on:
   schedule:
-    - cron: '0 * * * *' # Каждый час
-  workflow_dispatch:    # Ручной запуск
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: 'Кол-во страниц'
+        required: false
+        default: '3'
+      links:
+        description: 'Свои ссылки (через перевод строки)'
+        required: false
+        default: ''
+
+concurrency:
+  group: parse-marktplaats
+  cancel-in-progress: false
 
 jobs:
   run-parser:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-          
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-        
+
       - name: Get Playwright version
         id: playwright-version
-        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-        
+        run: |
+          echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-          
+
       - name: Install Playwright Browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install --with-deps chromium
-        
+
       - name: Install Playwright OS dependencies
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: playwright install-deps chromium
-        
+
       - name: Run parser
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          INPUT_PAGES: ${{ inputs.pages || '3' }}
+          INPUT_LINKS: ${{ inputs.links || '' }}
         run: python main.py
