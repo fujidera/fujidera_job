@@ -4,7 +4,7 @@ import os
 import random
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 from playwright.async_api import async_playwright
@@ -28,10 +28,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
 ]
 
+# ОБНОВЛЕННЫЙ СПИСОК: возвращены запрошенные категории
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
-    "https://www.marktplaats.nl/l/auto-s/#PriceCentsFrom:50000|PriceCentsTo:100000",
     "https://www.marktplaats.nl/l/auto-onderdelen/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/auto-diversen/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/boeken/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -39,17 +39,14 @@ DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/cd-s-en-dvd-s/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/computers-en-software/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/contacten-en-berichten/#PriceCentsFrom:12000|PriceCentsTo:95000",
-    "https://www.marktplaats.nl/l/diensten-en-vakmensen/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/dieren-en-toebehoren/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/doe-het-zelf-en-verbouw/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/fietsen-en-brommers/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/hobby-en-vrije-tijd/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/huis-en-inrichting/#PriceCentsFrom:12000|PriceCentsTo:95000",
-    "https://www.marktplaats.nl/l/huizen-en-kamers/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/kinderen-en-baby-s/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/kleding-dames/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/kleding-heren/#PriceCentsFrom:12000|PriceCentsTo:95000",
-    "https://www.marktplaats.nl/l/motoren/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/muziek-en-instrumenten/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/sieraden-tassen-en-uiterlijk/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/spelcomputers-en-games/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -57,35 +54,38 @@ DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/telecommunicatie/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/tickets-en-kaartjes/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/tuin-en-terras/#PriceCentsFrom:12000|PriceCentsTo:95000",
-    "https://www.marktplaats.nl/l/watersport-en-boten/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/witgoed-en-apparatuur/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/zakelijke-goederen/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/diversen/#PriceCentsFrom:12000|PriceCentsTo:95000"
 ]
 DEFAULT_PAGES = 3
 
-# Словарь для перевода голландских месяцев
 NL_MONTHS = {
     'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6,
     'jul': 7, 'aug': 8, 'sep': 9, 'okt': 10, 'nov': 11, 'dec': 12
 }
 
 def parse_dutch_date(date_str):
-    """Превращает '1 aug. \'26, 07:36' в ISO формат"""
-    if not date_str:
+    if not date_str or not isinstance(date_str, str) or date_str.strip().upper() == "EMPTY":
         return None
+        
+    date_str = date_str.strip().replace('\xa0', ' ').lower()
+    now = datetime.now(timezone.utc)
     
-    # Ищем паттерн: число, месяц, год (с апострофом или без), время
-    # Пример: "1 aug. '26, 07:36" или "1 nov. 25, 17:09"
-    match = re.search(r'(\d{1,2})\s+([a-zA-Z]{3})\.?\s+\'?(\d{2,4})[,\s]+(\d{1,2}):(\d{2})', date_str)
+    if "vandaag" in date_str:
+        return now.strftime('%Y-%m-%d')
+    if "gisteren" in date_str:
+        return (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    if "eergisteren" in date_str:
+        return (now - timedelta(days=2)).strftime('%Y-%m-%d')
+
+    match = re.search(r'(\d{1,2})\s*([a-zA-Z]{3,4})\.?\s*\'?(\d{2,4})', date_str)
     if not match:
         return None
         
     day = int(match.group(1))
-    month_str = match.group(2).lower()
+    month_str = match.group(2)[:3].lower()
     year_str = match.group(3)
-    hour = int(match.group(4))
-    minute = int(match.group(5))
     
     month = NL_MONTHS.get(month_str)
     if not month:
@@ -93,11 +93,11 @@ def parse_dutch_date(date_str):
         
     year = int(year_str)
     if year < 100:
-        year += 2000  # '26 -> 2026
+        year += 2000
         
     try:
-        dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
-        return dt.isoformat()
+        dt = datetime(year, month, day, tzinfo=timezone.utc)
+        return dt.strftime('%Y-%m-%d')
     except ValueError:
         return None
 
@@ -166,22 +166,18 @@ async def get_listing_details(page, item_data, retries=2):
             if title == "Без названия" or not title:
                 return None
 
-            # Ищем дату публикации
             raw_date = ""
-            try:
-                # Пытаемся взять title у элемента статистики
-                date_title_el = page.locator(".Report-module-stat[title]").first
-                if await date_title_el.count() > 0:
-                    raw_date = await date_title_el.get_attribute("title")
-                else:
-                    # Если нет, ищем текст вида "Sinds 1 aug '26"
-                    date_match = re.search(r'Sinds\s+([0-9]{1,2}\s+[a-zA-Z]{3}\.?\s+\'?[0-9]{2,4})', page_text)
-                    if date_match:
-                        raw_date = date_match.group(1)
-            except Exception:
-                pass
-                
-            # Конвертируем в ISO формат (TIMESTAMPTZ)
+            date_match = re.search(r'Sinds\s+(\d{1,2}\s+[a-zA-Z]{3,4}\.?\s*\'?\d{2,4}(?:[,\s]+\d{1,2}:\d{2})?)', page_text, re.IGNORECASE)
+            if date_match:
+                raw_date = date_match.group(1)
+            else:
+                try:
+                    date_title_el = page.locator(".Report-module-stat[title]").first
+                    if await date_title_el.count() > 0:
+                        raw_date = await date_title_el.get_attribute("title")
+                except Exception:
+                    pass
+                    
             posted_date = parse_dutch_date(raw_date)
 
             price_cents = 0
@@ -199,13 +195,19 @@ async def get_listing_details(page, item_data, retries=2):
                 pass
 
             item_id = url.split('/')[-1]
-            return {
-                "id": item_id, "title": title, "publication_date": posted_date,
+            
+            item_dict = {
+                "id": item_id, "title": title,
                 "parsing_date": datetime.now(timezone.utc).isoformat(),
                 "category": cat_name, "price_cents": price_cents,
                 "views_count": views, "favorites_count": favorites,
                 "url": url, "last_seen": datetime.now(timezone.utc).isoformat(),
             }
+            
+            if posted_date:
+                item_dict["publication_date"] = posted_date
+                
+            return item_dict
         except Exception:
             if attempt == retries - 1:
                 return None
@@ -276,11 +278,12 @@ def process_and_save(parsed_items):
         chunk = parsed_items[i:i + chunk_size]
         ids_to_check = [item["id"] for item in chunk]
         existing_data = {}
+        
         try:
             response = supabase.table("marktplaats_listings").select(
-                "id, price_cents"
+                "id, price_cents, publication_date"
             ).in_("id", ids_to_check).execute()
-            existing_data = {row["id"]: row["price_cents"] for row in response.data}
+            existing_data = {row["id"]: row for row in response.data}
         except Exception:
             continue
 
@@ -288,8 +291,14 @@ def process_and_save(parsed_items):
         for item in chunk:
             item_id = item["id"]
             current_price = item["price_cents"]
+            
+            if "publication_date" not in item and item_id in existing_data:
+                db_date = existing_data[item_id].get("publication_date")
+                if db_date:
+                    item["publication_date"] = db_date
+            
             if item_id in existing_data:
-                if existing_data[item_id] != current_price:
+                if existing_data[item_id].get("price_cents") != current_price:
                     snapshots_to_insert.append(
                         {"listing_id": item_id, "price_cents": current_price}
                     )
@@ -300,12 +309,11 @@ def process_and_save(parsed_items):
                 )
 
         try:
-            # upsert автоматически обработает ISO-строку даты в тип TIMESTAMPTZ
             supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
             if snapshots_to_insert:
                 supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка записи в базу: {e}")
     return new_listings_found
 
 
