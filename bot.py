@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import time
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,7 +21,6 @@ TG_CHAT_ID = int(os.environ["TG_CHAT_ID"])
 GH_TOKEN = os.environ.get("GH_TOKEN")
 GH_REPO = os.environ.get("GH_REPO")
 GH_WORKFLOW = os.environ.get("GH_WORKFLOW", "parse.yml")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 http = curl_requests.Session()
@@ -28,6 +29,22 @@ PAGE_SIZE = 10
 MAX_LIMIT = 30
 
 _list_states: dict[str, dict] = {}
+
+# ---------- Работа с offset в БД ----------
+def get_offset_from_db() -> int:
+    try:
+        res = supabase.table("bot_state").select("last_update_id").eq("id", 1).execute()
+        if res.data:
+            return int(res.data[0]["last_update_id"])
+    except Exception as e:
+        logger.error(f"DB error getting offset: {e}")
+    return 0
+
+def save_offset_to_db(offset: int):
+    try:
+        supabase.table("bot_state").upsert({"id": 1, "last_update_id": offset}).execute()
+    except Exception as e:
+        logger.error(f"DB error saving offset: {e}")
 
 # ---------- auth ----------
 def _authorized(update: Update) -> bool:
@@ -113,7 +130,6 @@ def _save_state(state: dict) -> str:
             _list_states.pop(k, None)
     return key
 
-# ---------- ядро списка с пагинацией ----------
 async def _send_list(reply_func, filters: dict, offset: int, state_key: str | None = None):
     limit = min(int(filters.get("limit", PAGE_SIZE)), MAX_LIMIT)
     try:
@@ -286,7 +302,6 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
-# ---------- inline callbacks ----------
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not _authorized(update):
@@ -311,9 +326,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("callback error")
         await q.edit_message_text(f"⚠️ {e}")
 
-# ---------- main ----------
-def main():
+# ---------- Главный цикл ----------
+async def run_bot_limited_time():
     app = Application.builder().token(TG_TOKEN).build()
+    
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler(["list", "find"], cmd_list))
@@ -321,17 +337,35 @@ def main():
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    port = int(os.environ.get("PORT", "8443"))
-    if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path="webhook",
-            webhook_url=f"{WEBHOOK_URL}/webhook",
-        )
-    else:
-        logger.warning("WEBHOOK_URL не задан — polling mode")
-        app.run_polling()
+    await app.initialize()
+    await app.start()
+    
+    offset = get_offset_from_db()
+    logger.info(f"Бот запущен. Начинаем с update_id: {offset}")
+
+    start_time = time.time()
+    MAX_RUNTIME = 20700  # 5 часов 45 минут (в секундах)
+
+    while time.time() - start_time < MAX_RUNTIME:
+        try:
+            # Ждем обновления 30 секунд
+            updates = await app.bot.get_updates(offset=offset + 1, timeout=30)
+            
+            for u in updates:
+                offset = u.update_id
+                save_offset_to_db(offset)
+                await app.process_update(u)
+                
+        except Exception as e:
+            logger.error(f"Ошибка polling: {e}")
+            await asyncio.sleep(5)
+
+    logger.info("Время вышло (5ч 45м). Завершаем работу.")
+    await app.stop()
+    await app.shutdown()
+
+def main():
+    asyncio.run(run_bot_limited_time())
 
 if __name__ == "__main__":
     main()
