@@ -28,7 +28,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
 ]
 
-# ОБНОВЛЕННЫЙ СПИСОК: возвращены запрошенные категории
+# Список категорий (27 шт., без машин, услуг и недвижимости)
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -101,29 +101,20 @@ def parse_dutch_date(date_str):
     except ValueError:
         return None
 
-def send_tg(text, reply_markup=None):
+def send_tg(text):
     if not TG_TOKEN or not TG_CHAT_ID:
         return
     try:
         payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
         if len(text) > 4000:
             for i in range(0, len(text), 4000):
                 payload["text"] = text[i:i + 4000]
-                tg_session.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                    json=payload, timeout=10,
-                )
+                tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=payload, timeout=10)
                 time.sleep(1)
         else:
-            tg_session.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json=payload, timeout=10,
-            )
+            tg_session.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception:
         pass
-
 
 async def get_listing_details(page, item_data, retries=2):
     url = item_data["url"]
@@ -139,9 +130,7 @@ async def get_listing_details(page, item_data, retries=2):
             await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
 
-            if ("Checking your browser" in page_text
-                    or "We hebben overal gezocht" in page_text
-                    or "Cloudflare" in page_text):
+            if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text):
                 return None
             if "Website" in page_text or "Bezoek website" in page_text:
                 return None
@@ -182,9 +171,7 @@ async def get_listing_details(page, item_data, retries=2):
 
             price_cents = 0
             try:
-                price_el = page.locator(
-                    "div.ListingHeader-module-price, div.ListingHeader-price, span.price"
-                ).first
+                price_el = page.locator("div.ListingHeader-module-price, div.ListingHeader-price, span.price").first
                 if await price_el.count() > 0:
                     raw_price = (await price_el.inner_text()).strip()
                     p_text = raw_price.replace('€', '').replace('.', '').replace(',', '.').strip()
@@ -213,15 +200,11 @@ async def get_listing_details(page, item_data, retries=2):
                 return None
             await asyncio.sleep(1)
 
-
 async def process_batch(context, batch_data):
     tasks = [await context.new_page() for _ in range(len(batch_data))]
     try:
         results = await asyncio.wait_for(
-            asyncio.gather(
-                *[get_listing_details(tasks[i], batch_data[i]) for i in range(len(batch_data))],
-                return_exceptions=True,
-            ),
+            asyncio.gather(*[get_listing_details(tasks[i], batch_data[i]) for i in range(len(batch_data))], return_exceptions=True),
             timeout=60.0,
         )
     except asyncio.TimeoutError:
@@ -230,7 +213,6 @@ async def process_batch(context, batch_data):
         for t in tasks:
             await t.close()
     return [r for r in results if isinstance(r, dict)]
-
 
 async def get_links_from_page(context, url):
     page = await context.new_page()
@@ -243,15 +225,13 @@ async def get_links_from_page(context, url):
         for l in links:
             href = await l.get_attribute("href")
             if href:
-                clean = ('https://www.marktplaats.nl' + href.split('?')[0]
-                         if href.startswith('/') else href.split('?')[0])
+                clean = ('https://www.marktplaats.nl' + href.split('?')[0] if href.startswith('/') else href.split('?')[0])
                 res.append(clean)
         return list(set(res))
     except Exception:
         return []
     finally:
         await page.close()
-
 
 def build_page_url(base_url, page_num):
     if page_num == 1:
@@ -268,7 +248,6 @@ def build_page_url(base_url, page_num):
         return f"{path}/p/{page_num}/{fragment}"
     return base_url
 
-
 def process_and_save(parsed_items):
     if not parsed_items:
         return []
@@ -280,9 +259,7 @@ def process_and_save(parsed_items):
         existing_data = {}
         
         try:
-            response = supabase.table("marktplaats_listings").select(
-                "id, price_cents, publication_date"
-            ).in_("id", ids_to_check).execute()
+            response = supabase.table("marktplaats_listings").select("id, price_cents, publication_date").in_("id", ids_to_check).execute()
             existing_data = {row["id"]: row for row in response.data}
         except Exception:
             continue
@@ -299,14 +276,10 @@ def process_and_save(parsed_items):
             
             if item_id in existing_data:
                 if existing_data[item_id].get("price_cents") != current_price:
-                    snapshots_to_insert.append(
-                        {"listing_id": item_id, "price_cents": current_price}
-                    )
+                    snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
             else:
                 new_listings_found.append(item)
-                snapshots_to_insert.append(
-                    {"listing_id": item_id, "price_cents": current_price}
-                )
+                snapshots_to_insert.append({"listing_id": item_id, "price_cents": current_price})
 
         try:
             supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
@@ -316,19 +289,13 @@ def process_and_save(parsed_items):
             logger.error(f"Ошибка записи в базу: {e}")
     return new_listings_found
 
-
 async def run_playwright(links_list, pages_count):
     all_parsed_items = [] 
     all_new_listings = [] 
     batch_size = 5
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True, args=['--disable-blink-features=AutomationControlled']
-        )
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={'width': 1920, 'height': 1080},
-        )
+        browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        context = await browser.new_context(user_agent=random.choice(USER_AGENTS), viewport={'width': 1920, 'height': 1080})
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
@@ -367,24 +334,19 @@ async def run_playwright(links_list, pages_count):
         await browser.close()
     return all_parsed_items, all_new_listings
 
-
 def get_total_db_count():
     try:
-        res = supabase.table("marktplaats_listings").select(
-            "id", count="exact"
-        ).limit(1).execute()
+        res = supabase.table("marktplaats_listings").select("id", count="exact").limit(1).execute()
         return res.count if res.count is not None else 0
     except Exception:
         return 0
-
 
 def main():
     pages = int(os.environ.get("INPUT_PAGES") or DEFAULT_PAGES)
     links_raw = (os.environ.get("INPUT_LINKS") or "").strip()
 
     if links_raw:
-        links_list = [l.strip() for l in links_raw.splitlines()
-                      if l.strip().startswith("http")]
+        links_list = [l.strip() for l in links_raw.splitlines() if l.strip().startswith("http")]
         if not links_list:
             links_list = DEFAULT_LINKS
     else:
@@ -401,18 +363,14 @@ def main():
 
             report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ (за текущий запуск)</b>\n\n"
             for cat, items in grouped.items():
-                items.sort(
-                    key=lambda x: x.get("views_count", 0) + (x.get("favorites_count", 0) * 20),
-                    reverse=True,
-                )
+                # Строгая сортировка по просмотрам
+                items.sort(key=lambda x: x.get("views_count", 0), reverse=True)
                 top_5 = items[:5]
                 report += f"📂 <b>{cat}</b> (спарсено {len(items)})\n"
                 for idx, item in enumerate(top_5, 1):
-                    price_str = (f"{item['price_cents'] / 100:.2f} €"
-                                 if item['price_cents'] else "См. описание")
+                    price_str = (f"{item['price_cents'] / 100:.2f} €" if item['price_cents'] else "См. описание")
                     report += f"  {idx}. <a href='{item['url']}'>{item['title'][:50]}</a>\n"
-                    report += (f"     👁 {item['views_count']} | "
-                               f"❤️ {item['favorites_count']} | 💰 {price_str}\n")
+                    report += (f"     👁 {item['views_count']} | ❤️ {item['favorites_count']} | 💰 {price_str}\n")
                 report += "\n"
 
             total_db = get_total_db_count()
@@ -423,7 +381,6 @@ def main():
             send_tg("🏁 Парсинг завершен! Не удалось собрать данные.")
     except Exception as e:
         send_tg(f"💥 Ошибка: {e}")
-
 
 if __name__ == "__main__":
     main()
