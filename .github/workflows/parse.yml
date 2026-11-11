@@ -1,5 +1,4 @@
 name: Parse Marktplaats
-
 on:
   schedule:
     - cron: '0 */3 * * *'
@@ -13,47 +12,80 @@ on:
         description: 'Свои ссылки (через перевод строки)'
         required: false
         default: ''
-
 concurrency:
   group: parse-marktplaats
   cancel-in-progress: false
-
 jobs:
   run-parser:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
+          
       - name: Install dependencies
         run: pip install -r requirements.txt
-
+        
       - name: Get Playwright version
         id: playwright-version
         run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-
+        
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          # Ключ изменен на v2, чтобы сбросить старый кэш без headless-shell
           key: ${{ runner.os }}-playwright-v2-${{ steps.playwright-version.outputs.version }}
+          
+      # --- ДОБАВЛЕНО: Настройка стабильности apt ---
+      - name: Configure APT mirrors and timeouts
+        run: |
+          echo 'Acquire::http::Timeout "60";' | sudo tee /etc/apt/apt.conf.d/99timeout
+          echo 'Acquire::https::Timeout "60";' | sudo tee -a /etc/apt/apt.conf.d/99timeout
+          echo 'Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99timeout
 
+      # --- ОБНОВЛЕНО: Установка браузеров с повторными попытками ---
       - name: Install Playwright Browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install --with-deps chromium chromium-headless-shell
+        run: |
+          for i in 1 2 3; do
+            echo "Попытка установки Playwright #$i"
+            if playwright install --with-deps chromium chromium-headless-shell; then
+              echo "Установка успешна!"
+              break
+            fi
+            echo "Попытка #$i не удалась. Ждем 10 секунд..."
+            sleep 10
+            if [ $i -eq 3 ]; then
+              echo "Все попытки исчерпаны. Прерываем выполнение."
+              exit 1
+            fi
+          done
 
+      # --- ОБНОВЛЕНО: Установка зависимостей с повторными попытками ---
       - name: Install Playwright OS dependencies
         if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
+        run: |
+          for i in 1 2 3; do
+            echo "Попытка установки зависимостей #$i"
+            if playwright install-deps chromium; then
+              echo "Зависимости установлены!"
+              break
+            fi
+            echo "Попытка #$i не удалась. Ждем 10 секунд..."
+            sleep 10
+            if [ $i -eq 3 ]; then
+              echo "Все попытки исчерпаны. Прерываем выполнение."
+              exit 1
+            fi
+          done
 
+      # --- Запуск парсера ---
       - name: Run parser
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -62,5 +94,4 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           INPUT_PAGES: ${{ inputs.pages || '3' }}
           INPUT_LINKS: ${{ inputs.links || '' }}
-        # Флаг -u заставляет Python выводить логи мгновенно
         run: python -u main.py
