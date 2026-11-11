@@ -105,17 +105,14 @@ async def get_listing_details(page, item_data, retries=2):
             page_text = await page.inner_text("body")
             page_html = await page.content()
 
-            # Защита от капчи и удаленных объявлений
             if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text): 
                 return None
             
-            # --- ЖЕСТКИЙ ФИЛЬТР КОММЕРЧЕСКИХ ПРОДАВЦОВ ---
+            # ЖЕСТКИЙ ФИЛЬТР КОММЕРЧЕСКИХ ПРОДАВЦОВ
             if '"sellerType":"TRADER"' in page_html or '"ad_seller_type":"TRADER"' in page_html:
                 return None
-            
             if "Zakelijke verkoper" in page_text or "Bedrijfsprofiel" in page_text:
                 return None
-            # -----------------------------------------------
 
             views = 0
             v_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
@@ -152,7 +149,7 @@ async def get_listing_details(page, item_data, retries=2):
                     if m: price_cents = int(float(m.group(1)) * 100)
             except Exception: pass
             
-            # --- СБОР ВСЕХ ФОТО ---
+            # СБОР ВСЕХ ФОТО
             image_urls = []
             try:
                 raw_urls = re.findall(r'(https://(?:images\.marktplaats\.com|admarkt-cdn\.marktplaats\.com)/api/v1/(?:hz-mp-pro-listing|icas-mp-pro-admarkt)/images/[^"\\\s]+)', page_html)
@@ -194,9 +191,8 @@ async def get_listing_details(page, item_data, retries=2):
                 logger.warning(f"Ошибка при сборе галереи фото: {e}")
 
             image_url = image_urls[0] if image_urls else ""
-            # ----------------------
 
-            # --- ОПИСАНИЕ И ПРОДАВЕЦ ---
+            # ОПИСАНИЕ И ПРОДАВЕЦ
             description = ""
             try:
                 desc_el = page.locator("div[data-testid='description'], div.Description-module-description, div.Description").first
@@ -210,28 +206,24 @@ async def get_listing_details(page, item_data, retries=2):
                 if await seller_el.count() > 0:
                     seller_name = (await seller_el.inner_text()).strip()
             except Exception: pass
-            # ---------------------------
 
-            # --- ИЗВЛЕЧЕНИЕ ПОДКАТЕГОРИЙ (L1 и L2) ---
+            # ИЗВЛЕЧЕНИЕ ПОДКАТЕГОРИЙ (L1 и L2)
             category_l1 = cat_name
             category_l2 = ""
             try:
                 parts = url.split('/')
                 if 'v' in parts:
                     v_idx = parts.index('v')
-                    # Формат URL: .../v/l1-slug/l2-slug/id
                     if len(parts) > v_idx + 2:
                         category_l1 = parts[v_idx + 1]
                         category_l2 = parts[v_idx + 2]
             except Exception:
                 pass
-            # -----------------------------------------
 
             item_id = url.split('/')[-1]
             item_dict = {
                 "id": item_id, "title": title,
                 "parsing_date": datetime.now(timezone.utc).isoformat(),
-                "category": cat_name, 
                 "category_l1": category_l1,
                 "category_l2": category_l2,
                 "price_cents": price_cents,
@@ -387,7 +379,9 @@ def main():
         parsed_items, new_items = asyncio.run(run_playwright(links_list, pages))
         if parsed_items:
             grouped = defaultdict(list)
-            for item in parsed_items: grouped[item['category']].append(item)
+            # Группируем по category_l1
+            for item in parsed_items: 
+                grouped[item.get('category_l1', 'Other')].append(item)
 
             report = "🏆 <b>ТОП-5 ОБЪЯВЛЕНИЙ ПО КАТЕГОРИЯМ</b>\n\n"
             for cat, items in grouped.items():
