@@ -4,7 +4,6 @@ import os
 import random
 import time
 import logging
-import json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -28,6 +27,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
+# Список категорий (27 шт., без машин и услуг)
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -104,22 +104,19 @@ async def get_listing_details(page, item_data, retries=2):
             except Exception: return None
             await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
-            
+            page_html = await page.content()
+
             # Защита от капчи и удаленных объявлений
             if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text): 
                 return None
             
-            # --- ФИЛЬТР КОММЕРЧЕСКИХ ПРОДАВЦОВ ---
-            if "Website" in page_text or "Bezoek website" in page_text: 
+            # --- ЖЕСТКИЙ ФИЛЬТР КОММЕРЧЕСКИХ ПРОДАВЦОВ ---
+            if '"sellerType":"TRADER"' in page_html or '"ad_seller_type":"TRADER"' in page_html:
                 return None
-            try:
-                badges = await page.locator(".SellerInfo-badge, [data-testid='seller-badge'], .Badge, span").all()
-                for badge in badges:
-                    badge_text = (await badge.inner_text()).strip().lower()
-                    if badge_text in ["zakelijk", "bedrijf", "zakelijke aanbieder", "professionele verkoper"]:
-                        return None
-            except Exception: pass
-            # -------------------------------------
+            
+            if "Zakelijke verkoper" in page_text or "Bedrijfsprofiel" in page_text:
+                return None
+            # -----------------------------------------------
 
             views = 0
             v_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
@@ -156,56 +153,44 @@ async def get_listing_details(page, item_data, retries=2):
                     if m: price_cents = int(float(m.group(1)) * 100)
             except Exception: pass
             
-            # --- СБОР ВСЕХ ФОТО (Максимально надежный способ) ---
+            # --- СБОР ВСЕХ ФОТО ---
             image_urls = []
             try:
-                # 1. Пытаемся достать все фото из JSON-данных страницы (Next.js)
-                page_html = await page.content()
-                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page_html, re.DOTALL)
-                if match:
-                    json_str = match.group(1)
-                    raw_urls = re.findall(r'(https://images\.marktplaats\.com[^"\\]+)', json_str)
-                    
-                    seen = set()
-                    for u in raw_urls:
-                        clean = u.split('?')[0]
-                        # Фильтруем только фото товара (в пути есть 'listing-mp-p')
-                        if 'listing-mp-p' in clean:
-                            if clean not in seen:
-                                seen.add(clean)
-                                image_urls.append(clean)
+                raw_urls = re.findall(r'(https://(?:images\.marktplaats\.com|admarkt-cdn\.marktplaats\.com)/api/v1/(?:hz-mp-pro-listing|icas-mp-pro-admarkt)/images/[^"\\\s]+)', page_html)
+                seen = set()
+                for u in raw_urls:
+                    clean = u.split('?')[0]
+                    if '/profile/' not in clean and clean not in seen:
+                        seen.add(clean)
+                        image_urls.append(clean)
                 
-                # 2. Если JSON не сработал, кликаем по карусели
                 if not image_urls:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await page.wait_for_timeout(1000)
-                    
-                    images = await page.locator("img[src*='images.marktplaats.com']").all()
+                    images = await page.locator("img[src*='images.marktplaats.com'], img[src*='admarkt-cdn.marktplaats.com']").all()
                     seen_urls = set()
                     for img in images:
                         src = await img.get_attribute("src")
                         if src:
                             clean_url = src.split('?')[0]
-                            if 'listing-mp-p' in clean_url and clean_url not in seen_urls:
+                            if '/profile/' not in clean_url and clean_url not in seen_urls:
                                 seen_urls.add(clean_url)
                                 image_urls.append(clean_url)
                                 
-                    # Цикл кликов по стрелке "Вперед"
                     for _ in range(10): 
                         next_btn = page.locator("button[aria-label='Volgende afbeelding'], button[aria-label='Next image']").first
                         if await next_btn.count() > 0 and await next_btn.is_visible():
                             await next_btn.click()
                             await page.wait_for_timeout(500)
-                            new_images = await page.locator("img[src*='images.marktplaats.com']").all()
+                            new_images = await page.locator("img[src*='images.marktplaats.com'], img[src*='admarkt-cdn.marktplaats.com']").all()
                             for img in new_images:
                                 src = await img.get_attribute("src")
                                 if src:
                                     clean_url = src.split('?')[0]
-                                    if 'listing-mp-p' in clean_url and clean_url not in seen_urls:
+                                    if '/profile/' not in clean_url and clean_url not in seen_urls:
                                         seen_urls.add(clean_url)
                                         image_urls.append(clean_url)
-                        else:
-                            break
+                        else: break
             except Exception as e:
                 logger.warning(f"Ошибка при сборе галереи фото: {e}")
 
@@ -215,14 +200,14 @@ async def get_listing_details(page, item_data, retries=2):
             # --- ОПИСАНИЕ И ПРОДАВЕЦ ---
             description = ""
             try:
-                desc_el = page.locator("div[data-testid='description'], div.Description, div[class*='Description']").first
+                desc_el = page.locator("div[data-testid='description'], div.Description-module-description, div.Description").first
                 if await desc_el.count() > 0:
                     description = (await desc_el.inner_text()).strip()
             except Exception: pass
 
             seller_name = ""
             try:
-                seller_el = page.locator("a[href*='/u/']").first
+                seller_el = page.locator("a[href*='/u/'], .SellerInfoSmall-name a").first
                 if await seller_el.count() > 0:
                     seller_name = (await seller_el.inner_text()).strip()
             except Exception: pass
@@ -242,7 +227,8 @@ async def get_listing_details(page, item_data, retries=2):
             }
             if posted_date: item_dict["publication_date"] = posted_date
             return item_dict
-        except Exception:
+        except Exception as e:
+            logger.error(f"Ошибка парсинга {url}: {e}")
             if attempt == retries - 1: return None
             await asyncio.sleep(1)
 
@@ -317,7 +303,8 @@ def process_and_save(parsed_items):
             supabase.table("marktplaats_listings").upsert(chunk, on_conflict="id").execute()
             if snapshots_to_insert:
                 supabase.table("marktplaats_snapshots").insert(snapshots_to_insert).execute()
-        except Exception as e: logger.error(f"Ошибка записи: {e}")
+        except Exception as e: 
+            logger.error(f"Ошибка записи в базу: {e}")
     return new_listings_found
 
 async def run_playwright(links_list, pages_count):
@@ -400,7 +387,7 @@ def main():
             report += f"🆕 <b>Из них новых:</b> {len(new_items)}\n"
             report += f"🗄 <b>Всего в базе:</b> {total_db} объявлений."
             send_tg(report)
-        else: send_tg("🏁 Парсинг завершен! Не удалось собрать данные.")
+        else: send_tg("🏁 Парсинг завершен! Не удалось собрать данные (возможно, сработал фильтр магазинов).")
     except Exception as e: send_tg(f"💥 Ошибка: {e}")
 
 if __name__ == "__main__":
