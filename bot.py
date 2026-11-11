@@ -24,7 +24,7 @@ GH_REPO = os.environ.get("GH_REPO")
 GH_WORKFLOW = os.environ.get("GH_WORKFLOW", "parse.yml")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-http = curl_cffi.Session()
+http = curl_requests.Session() # <--- ИСПРАВЛЕНО ЗДЕСЬ
 PAGE_SIZE = 10
 MAX_LIMIT = 30
 _list_states = {}
