@@ -6,6 +6,7 @@ import time
 import logging
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import async_playwright
 from curl_cffi import requests as curl_requests
@@ -63,7 +64,11 @@ NL_MONTHS = {'jan': 1, 'feb': 2, 'mrt': 3, 'apr': 4, 'mei': 5, 'jun': 6, 'jul': 
 def parse_dutch_date(date_str):
     if not date_str or not isinstance(date_str, str) or date_str.strip().upper() == "EMPTY": return None
     date_str = date_str.strip().replace('\xa0', ' ').lower()
-    now = datetime.now(timezone.utc)
+    
+    # ИСПОЛЬЗУЕМ ВРЕМЯ НИДЕРЛАНДОВ ВМЕСТО UTC
+    nl_tz = ZoneInfo("Europe/Amsterdam")
+    now = datetime.now(nl_tz)
+    
     if "vandaag" in date_str: return now.strftime('%Y-%m-%d')
     if "gisteren" in date_str: return (now - timedelta(days=1)).strftime('%Y-%m-%d')
     if "eergisteren" in date_str: return (now - timedelta(days=2)).strftime('%Y-%m-%d')
@@ -77,8 +82,12 @@ def parse_dutch_date(date_str):
     if not month: return None
     year = int(year_str)
     if year < 100: year += 2000
-    try: return datetime(year, month, day, tzinfo=timezone.utc).strftime('%Y-%m-%d')
-    except ValueError: return None
+    
+    try: 
+        # Указываем часовой пояс Нидерландов при создании даты
+        return datetime(year, month, day, tzinfo=nl_tz).strftime('%Y-%m-%d')
+    except ValueError: 
+        return None
 
 def send_tg(text):
     if not TG_TOKEN or not TG_CHAT_ID: return
