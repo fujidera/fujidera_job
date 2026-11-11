@@ -65,7 +65,6 @@ def parse_dutch_date(date_str):
     if not date_str or not isinstance(date_str, str) or date_str.strip().upper() == "EMPTY": return None
     date_str = date_str.strip().replace('\xa0', ' ').lower()
     
-    # ИСПОЛЬЗУЕМ ВРЕМЯ НИДЕРЛАНДОВ
     nl_tz = ZoneInfo("Europe/Amsterdam")
     now = datetime.now(nl_tz)
     
@@ -230,7 +229,6 @@ async def get_listing_details(page, item_data, retries=2):
                 parts = url.split('/')
                 if 'v' in parts:
                     v_idx = parts.index('v')
-                    # Формат URL: .../v/l1-slug/l2-slug/id
                     if len(parts) > v_idx + 2:
                         category_l1 = parts[v_idx + 1]
                         category_l2 = parts[v_idx + 2]
