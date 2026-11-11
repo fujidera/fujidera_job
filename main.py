@@ -4,6 +4,7 @@ import os
 import random
 import time
 import logging
+import json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -103,8 +104,22 @@ async def get_listing_details(page, item_data, retries=2):
             except Exception: return None
             await page.wait_for_timeout(1000)
             page_text = await page.inner_text("body")
-            if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text): return None
-            if "Website" in page_text or "Bezoek website" in page_text: return None
+            
+            # Защита от капчи и удаленных объявлений
+            if ("Checking your browser" in page_text or "We hebben overal gezocht" in page_text or "Cloudflare" in page_text): 
+                return None
+            
+            # --- ФИЛЬТР КОММЕРЧЕСКИХ ПРОДАВЦОВ ---
+            if "Website" in page_text or "Bezoek website" in page_text: 
+                return None
+            try:
+                badges = await page.locator(".SellerInfo-badge, [data-testid='seller-badge'], .Badge, span").all()
+                for badge in badges:
+                    badge_text = (await badge.inner_text()).strip().lower()
+                    if badge_text in ["zakelijk", "bedrijf", "zakelijke aanbieder", "professionele verkoper"]:
+                        return None
+            except Exception: pass
+            # -------------------------------------
 
             views = 0
             v_match = re.search(r'(\d+(?:\.\d+)*)\s*(?:x|keer)\s*bekeken', page_text, re.IGNORECASE)
@@ -141,22 +156,56 @@ async def get_listing_details(page, item_data, retries=2):
                     if m: price_cents = int(float(m.group(1)) * 100)
             except Exception: pass
             
-            # --- СБОР ВСЕХ ФОТО ---
+            # --- СБОР ВСЕХ ФОТО (Максимально надежный способ) ---
             image_urls = []
             try:
-                # Прокручиваем, чтобы подгрузились ленивые картинки
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1000)
-                images = await page.locator("img[src*='images.marktplaats.com']").all()
+                # 1. Пытаемся достать все фото из JSON-данных страницы (Next.js)
+                page_html = await page.content()
+                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page_html, re.DOTALL)
+                if match:
+                    json_str = match.group(1)
+                    raw_urls = re.findall(r'(https://images\.marktplaats\.com[^"\\]+)', json_str)
+                    
+                    seen = set()
+                    for u in raw_urls:
+                        clean = u.split('?')[0]
+                        # Фильтруем только фото товара (в пути есть 'listing-mp-p')
+                        if 'listing-mp-p' in clean:
+                            if clean not in seen:
+                                seen.add(clean)
+                                image_urls.append(clean)
                 
-                seen_urls = set()
-                for img in images:
-                    src = await img.get_attribute("src")
-                    if src:
-                        clean_url = src.split('?')[0]
-                        if clean_url not in seen_urls:
-                            seen_urls.add(clean_url)
-                            image_urls.append(clean_url)
+                # 2. Если JSON не сработал, кликаем по карусели
+                if not image_urls:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(1000)
+                    
+                    images = await page.locator("img[src*='images.marktplaats.com']").all()
+                    seen_urls = set()
+                    for img in images:
+                        src = await img.get_attribute("src")
+                        if src:
+                            clean_url = src.split('?')[0]
+                            if 'listing-mp-p' in clean_url and clean_url not in seen_urls:
+                                seen_urls.add(clean_url)
+                                image_urls.append(clean_url)
+                                
+                    # Цикл кликов по стрелке "Вперед"
+                    for _ in range(10): 
+                        next_btn = page.locator("button[aria-label='Volgende afbeelding'], button[aria-label='Next image']").first
+                        if await next_btn.count() > 0 and await next_btn.is_visible():
+                            await next_btn.click()
+                            await page.wait_for_timeout(500)
+                            new_images = await page.locator("img[src*='images.marktplaats.com']").all()
+                            for img in new_images:
+                                src = await img.get_attribute("src")
+                                if src:
+                                    clean_url = src.split('?')[0]
+                                    if 'listing-mp-p' in clean_url and clean_url not in seen_urls:
+                                        seen_urls.add(clean_url)
+                                        image_urls.append(clean_url)
+                        else:
+                            break
             except Exception as e:
                 logger.warning(f"Ошибка при сборе галереи фото: {e}")
 
