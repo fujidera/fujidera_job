@@ -27,7 +27,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
-# Список категорий (27 шт., без машин и услуг)
 DEFAULT_LINKS = [
     "https://www.marktplaats.nl/l/antiek-en-kunst/#PriceCentsFrom:12000|PriceCentsTo:95000",
     "https://www.marktplaats.nl/l/audio-tv-en-foto/#PriceCentsFrom:12000|PriceCentsTo:95000",
@@ -213,11 +212,29 @@ async def get_listing_details(page, item_data, retries=2):
             except Exception: pass
             # ---------------------------
 
+            # --- ИЗВЛЕЧЕНИЕ ПОДКАТЕГОРИЙ (L1 и L2) ---
+            category_l1 = cat_name
+            category_l2 = ""
+            try:
+                parts = url.split('/')
+                if 'v' in parts:
+                    v_idx = parts.index('v')
+                    # Формат URL: .../v/l1-slug/l2-slug/id
+                    if len(parts) > v_idx + 2:
+                        category_l1 = parts[v_idx + 1]
+                        category_l2 = parts[v_idx + 2]
+            except Exception:
+                pass
+            # -----------------------------------------
+
             item_id = url.split('/')[-1]
             item_dict = {
                 "id": item_id, "title": title,
                 "parsing_date": datetime.now(timezone.utc).isoformat(),
-                "category": cat_name, "price_cents": price_cents,
+                "category": cat_name, 
+                "category_l1": category_l1,
+                "category_l2": category_l2,
+                "price_cents": price_cents,
                 "views_count": views, "favorites_count": favorites,
                 "url": url, "last_seen": datetime.now(timezone.utc).isoformat(),
                 "image_url": image_url,
