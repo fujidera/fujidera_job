@@ -24,7 +24,7 @@ GH_REPO = os.environ.get("GH_REPO")
 GH_WORKFLOW = os.environ.get("GH_WORKFLOW", "parse.yml")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-http = curl_requests.Session() # <--- ИСПРАВЛЕНО ЗДЕСЬ
+http = curl_requests.Session()
 PAGE_SIZE = 10
 MAX_LIMIT = 30
 _list_states = {}
@@ -68,7 +68,6 @@ def parse_filters(text: str) -> dict:
     return result
 
 def _apply_filters(q, f: dict):
-    # Заменили category на category_l1
     if "cat" in f: q = q.ilike("category_l1", f"%{f['cat']}%")
     if "q" in f: q = q.ilike("title", f"%{f['q']}%")
     if "min_price" in f:
@@ -100,7 +99,6 @@ async def _send_list(reply_func, filters: dict, offset: int, state_key: str | No
     try:
         cq = _apply_filters(supabase.table("marktplaats_listings").select("id", count="exact"), filters)
         total = cq.limit(1).execute().count or 0
-        # В select заменили category на category_l1
         q = _apply_filters(supabase.table("marktplaats_listings").select(
             "id,title,url,views_count,favorites_count,price_cents,category_l1,publication_date"
         ), filters).range(offset, offset + limit - 1)
@@ -128,7 +126,14 @@ async def _send_list(reply_func, filters: dict, offset: int, state_key: str | No
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update): return await _reject(update)
-    text = "👋 <b>Привет! Я бот для поиска объявлений.</b>\n\nИспользуй кнопки внизу или команды:\n/list q:iphone min_price:100"
+    text = (
+        "👋 <b>Привет! Я бот для поиска объявлений.</b>\n\n"
+        "Используй кнопки внизу или команды:\n"
+        "/list q:iphone min_price:100\n\n"
+        "🚀 <b>Запуск парсера:</b>\n"
+        "• <code>/run</code> — стандартный (все категории по 3 стр)\n"
+        "• <code>/run https://www.marktplaats.nl/l/boeken/ 20</code> — глубокий парсинг конкретной категории (20 страниц)"
+    )
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,15 +157,41 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update): return await _reject(update)
     if not GH_TOKEN or not GH_REPO: return await update.message.reply_text("⚠️ GH не настроены.")
+    
+    pages = "3"
+    links = ""
+    
+    if context.args:
+        if len(context.args) >= 2 and context.args[0].startswith("http"):
+            links = context.args[0]
+            pages = context.args[1]
+        elif context.args[0].isdigit():
+            pages = context.args[0]
+
     try:
+        payload = {
+            "ref": "main", 
+            "inputs": {
+                "pages": pages, 
+                "links": links
+            }
+        }
+        
         r = http.post(
             f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/dispatches",
             headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json", "User-Agent": "MP-Bot"},
-            json={"ref": "main", "inputs": {"pages": "3", "links": ""}}, timeout=15,
+            json=payload, timeout=15,
         )
-        if r.status_code in (200, 204): await update.message.reply_text("🚀 Парсер запущен!")
-        else: await update.message.reply_text(f"⚠️ GH {r.status_code}: {r.text[:100]}")
-    except Exception as e: await update.message.reply_text(f"⚠️ Ошибка: {e}")
+        
+        if r.status_code in (200, 204):
+            if links:
+                await update.message.reply_text(f"🚀 Парсер запущен!\n🔗 Ссылка: {links}\n📄 Страниц: {pages}")
+            else:
+                await update.message.reply_text(f"🚀 Парсер запущен по всем категориям! (Страниц на категорию: {pages})")
+        else:
+            await update.message.reply_text(f"⚠️ GH {r.status_code}: {r.text[:100]}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
 async def handle_text_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update): return await _reject(update)
