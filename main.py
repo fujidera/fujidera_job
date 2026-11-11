@@ -141,21 +141,29 @@ async def get_listing_details(page, item_data, retries=2):
                     if m: price_cents = int(float(m.group(1)) * 100)
             except Exception: pass
             
-            # 1. Картинка (через мета-тег og:image, он не зависит от lazy-load)
-            image_url = ""
+            # --- СБОР ВСЕХ ФОТО ---
+            image_urls = []
             try:
-                meta_img = page.locator("meta[property='og:image']").first
-                if await meta_img.count() > 0:
-                    image_url = await meta_img.get_attribute("content")
-                else:
-                    img_el = page.locator("img[src*='marktplaats.com']").first
-                    if await img_el.count() > 0: 
-                        image_url = await img_el.get_attribute("src")
-            except Exception: pass
-            if image_url and not image_url.startswith('http'):
-                image_url = ""
+                # Прокручиваем, чтобы подгрузились ленивые картинки
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1000)
+                images = await page.locator("img[src*='images.marktplaats.com']").all()
+                
+                seen_urls = set()
+                for img in images:
+                    src = await img.get_attribute("src")
+                    if src:
+                        clean_url = src.split('?')[0]
+                        if clean_url not in seen_urls:
+                            seen_urls.add(clean_url)
+                            image_urls.append(clean_url)
+            except Exception as e:
+                logger.warning(f"Ошибка при сборе галереи фото: {e}")
 
-            # 2. Описание
+            image_url = image_urls[0] if image_urls else ""
+            # ----------------------
+
+            # --- ОПИСАНИЕ И ПРОДАВЕЦ ---
             description = ""
             try:
                 desc_el = page.locator("div[data-testid='description'], div.Description, div[class*='Description']").first
@@ -163,13 +171,13 @@ async def get_listing_details(page, item_data, retries=2):
                     description = (await desc_el.inner_text()).strip()
             except Exception: pass
 
-            # 3. Продавец
             seller_name = ""
             try:
                 seller_el = page.locator("a[href*='/u/']").first
                 if await seller_el.count() > 0:
                     seller_name = (await seller_el.inner_text()).strip()
             except Exception: pass
+            # ---------------------------
 
             item_id = url.split('/')[-1]
             item_dict = {
@@ -179,6 +187,7 @@ async def get_listing_details(page, item_data, retries=2):
                 "views_count": views, "favorites_count": favorites,
                 "url": url, "last_seen": datetime.now(timezone.utc).isoformat(),
                 "image_url": image_url,
+                "image_urls": image_urls,
                 "description": description,
                 "seller_name": seller_name
             }
