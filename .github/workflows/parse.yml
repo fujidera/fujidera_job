@@ -41,47 +41,32 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-v2-${{ steps.playwright-version.outputs.version }}
-          
-      - name: Configure APT mirrors and timeouts
-        run: |
-          echo 'Acquire::http::Timeout "60";' | sudo tee /etc/apt/apt.conf.d/99timeout
-          echo 'Acquire::https::Timeout "60";' | sudo tee -a /etc/apt/apt.conf.d/99timeout
-          echo 'Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99timeout
 
+      # --- ДОБАВЛЕНО: Принудительная настройка DNS ---
+      - name: Set up DNS
+        run: |
+          sudo sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
+          sudo sh -c 'echo "nameserver 8.8.4.4" >> /etc/resolv.conf'
+
+      # --- ОБНОВЛЕНО: Установка OS зависимостей с помощью готового экшена ---
+      - name: Install Playwright OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: playwright install-deps chromium
+
+      # --- ОБНОВЛЕНО: Установка браузеров с помощью готового экшена ---
       - name: Install Playwright Browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: |
-          for i in 1 2 3; do
-            echo "Попытка установки Playwright #$i"
-            if playwright install --with-deps chromium chromium-headless-shell; then
-              echo "Установка успешна!"
-              break
-            fi
-            echo "Попытка #$i не удалась. Ждем 10 секунд..."
-            sleep 10
-            if [ $i -eq 3 ]; then
-              echo "Все попытки исчерпаны. Прерываем выполнение."
-              exit 1
-            fi
-          done
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: playwright install chromium chromium-headless-shell
 
-      - name: Install Playwright OS dependencies
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: |
-          for i in 1 2 3; do
-            echo "Попытка установки зависимостей #$i"
-            if playwright install-deps chromium; then
-              echo "Зависимости установлены!"
-              break
-            fi
-            echo "Попытка #$i не удалась. Ждем 10 секунд..."
-            sleep 10
-            if [ $i -eq 3 ]; then
-              echo "Все попытки исчерпаны. Прерываем выполнение."
-              exit 1
-            fi
-          done
-
+      # --- Запуск парсера ---
       - name: Run parser
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
