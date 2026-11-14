@@ -1,4 +1,5 @@
 name: Parse Marktplaats
+
 on:
   schedule:
     - cron: '0 */3 * * *'
@@ -12,59 +13,52 @@ on:
         description: 'Свои ссылки (через перевод строки)'
         required: false
         default: ''
+
 concurrency:
   group: parse-marktplaats
   cancel-in-progress: false
+
 jobs:
   run-parser:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-          
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-        
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(python -c 'import playwright; print(playwright.__version__)')" >> $GITHUB_OUTPUT
-        
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-v2-${{ steps.playwright-version.outputs.version }}
 
-      # --- ДОБАВЛЕНО: Принудительная настройка DNS ---
+      # Принудительная настройка DNS (защита от ошибки Temporary failure resolving)
       - name: Set up DNS
         run: |
           sudo sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
           sudo sh -c 'echo "nameserver 8.8.4.4" >> /etc/resolv.conf'
 
-      # --- ОБНОВЛЕНО: Установка OS зависимостей с помощью готового экшена ---
-      - name: Install Playwright OS dependencies
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: nick-fields/retry@v3
+      # Кэшируем браузеры (используем v3, чтобы сбросить старый проблемный кэш)
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        id: playwright-cache
         with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: playwright install-deps chromium
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-v3-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-v3-
 
-      # --- ОБНОВЛЕНО: Установка браузеров с помощью готового экшена ---
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      # Установка выполняется ТОЛЬКО если кэш не найден или битый
+      # Команда --with-deps сразу ставит и системные библиотеки, и браузер
       - name: Install Playwright Browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          command: playwright install chromium chromium-headless-shell
+        run: playwright install --with-deps chromium chromium-headless-shell
 
       # --- Запуск парсера ---
       - name: Run parser
